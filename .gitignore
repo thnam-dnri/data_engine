@@ -37,6 +37,9 @@ build/
 # Bitstreams (uncomment if you don't want to track bitfiles in git)
 # *.bit
 
+# Root-level markdown files (documentation kept local, not in repo)
+/*.md
+
 # Python
 __pycache__/
 *.pyc
