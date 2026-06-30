@@ -1,0 +1,131 @@
+# data_engine — FPGA Acquisition Pipeline Makefile
+#
+# Targets:
+#   make sim_unit    — Run unit testbenches with iverilog (fast, Phase 0-2)
+#   make sim_integ   — Run integration testbenches with Vivado xvlog (Phase 2.7+)
+#   make synth       — Synthesize top with Vivado batch mode
+#   make program     — Program bitstream to FPGA via hw_server
+#   make clean       — Remove build artifacts
+#   make clean_sim   — Remove simulation artifacts only
+#   make clean_synth — Remove synthesis artifacts only
+
+# --- Paths ---
+RTL_DIR     := rtl
+TB_DIR      := tb
+CONST_DIR   := constraints
+HW_SPEC_DIR := hardware_spec
+BUILD_DIR   := build
+SIM_DIR     := $(BUILD_DIR)/sim
+SYNTH_DIR   := $(BUILD_DIR)/synth
+
+# --- Toolchain ---
+IVERILOG    := iverilog
+VVP         := vvp
+VIVADO      := vivado
+VIVADO_MODE := -mode batch
+HW_SERVER   := $(HOME)/Xilinx/2026.1/Vivado_Lab/bin/hw_server
+
+# --- RTL source files (auto-collected) ---
+RTL_PKG     := $(wildcard $(RTL_DIR)/pkg/*.sv)
+RTL_SRCS    := $(wildcard $(RTL_DIR)/*/*.sv) $(RTL_DIR)/top_stream.sv $(RTL_DIR)/top_pipeline.sv $(RTL_DIR)/top.sv
+
+# --- Unit testbenches (iverilog, per-module) ---
+TB_UNIT     := $(TB_DIR)/tb_types.sv \
+               $(TB_DIR)/tb_adc_interface.sv \
+               $(TB_DIR)/tb_cdc_fifo.sv \
+               $(TB_DIR)/tb_comm_dpti.sv \
+               $(TB_DIR)/tb_stream.sv \
+               $(TB_DIR)/tb_glitch_filter.sv \
+               $(TB_DIR)/tb_circular_buffer.sv \
+               $(TB_DIR)/tb_trigger.sv \
+               $(TB_DIR)/tb_descriptor_fifo.sv \
+               $(TB_DIR)/tb_waveform_reader.sv \
+               $(TB_DIR)/tb_tx_fifo.sv
+
+# --- Integration testbenches (Vivado xvlog) ---
+TB_INTEG    := $(TB_DIR)/tb_pipeline.sv \
+               $(TB_DIR)/tb_audit_aggregator.sv \
+               $(TB_DIR)/tb_pipeline_debug.sv \
+               $(TB_DIR)/tb_bist.sv
+
+# --- Synthesis top ---
+SYNTH_TOP   := top_stream
+XDC_FILES   := $(HW_SPEC_DIR)/USB104_A7_Zmod_ADC1410.xdc $(CONST_DIR)/timing.xdc
+PART        := xc7a100tcsg324-1
+
+# --- Default target ---
+.DEFAULT_GOAL := help
+
+.PHONY: help sim_unit sim_integ synth program clean clean_sim clean_synth
+
+help:
+	@echo "data_engine Makefile targets:"
+	@echo "  make sim_unit    — Unit testbenches via iverilog (fast feedback)"
+	@echo "  make sim_integ   — Integration testbenches via Vivado xvlog"
+	@echo "  make synth       — Synthesize top_stream with Vivado batch"
+	@echo "  make program     — Program bitstream to FPGA"
+	@echo "  make clean       — Remove all build artifacts"
+	@echo "  make clean_sim   — Remove sim artifacts only"
+	@echo "  make clean_synth — Remove synth artifacts only"
+
+# =============================================================================
+# Unit simulation (iverilog — fast, ~10x compile vs xvlog)
+# Note: iverilog has incomplete SystemVerilog interface support.
+#       Unit testbenches should use packed structs directly, not interfaces.
+# =============================================================================
+
+sim_unit: $(TB_UNIT:.sv=.vvp)
+
+# Pattern rule: compile each .sv testbench to .vvp with iverilog
+%.vvp: %.sv $(RTL_PKG)
+	@mkdir -p $(SIM_DIR)/unit
+	@echo "=== Compiling $< with iverilog ==="
+	$(IVERILOG) -g2012 -o $@ $< $(RTL_PKG) 2>&1 | tee $(SIM_DIR)/unit/$(notdir $@).log
+	@echo "=== Running $@ ==="
+	$(VVP) $@ 2>&1 | tee -a $(SIM_DIR)/unit/$(notdir $@).log
+
+# =============================================================================
+# Integration simulation (Vivado xvlog — full SV interface + Xilinx primitive support)
+# =============================================================================
+
+sim_integ:
+	@mkdir -p $(SIM_DIR)/integ
+	@echo "=== Running integration testbenches with Vivado xvlog ==="
+	$(VIVADO) $(VIVADO_MODE) -source scripts/sim_integ.tcl 2>&1 | tee $(SIM_DIR)/integ/run.log
+
+# =============================================================================
+# Synthesis (Vivado batch mode)
+# =============================================================================
+
+synth:
+	@mkdir -p $(SYNTH_DIR)
+	@echo "=== Synthesizing $(SYNTH_TOP) with Vivado ==="
+	$(VIVADO) $(VIVADO_MODE) -source scripts/synth.tcl 2>&1 | tee $(SYNTH_DIR)/synth.log
+	@echo "=== Synthesis complete. Check $(SYNTH_DIR)/ for reports. ==="
+
+# =============================================================================
+# Program FPGA (via hw_server + Vivado Lab)
+# =============================================================================
+
+program:
+	@echo "=== Programming FPGA ==="
+	@if ! pgrep -x hw_server > /dev/null; then \
+		echo "Starting hw_server..."; \
+		$(HW_SERVER) & \
+		sleep 2; \
+	fi
+	$(VIVADO) $(VIVADO_MODE) -source scripts/program.tcl 2>&1 | tee $(SYNTH_DIR)/program.log
+
+# =============================================================================
+# Clean targets
+# =============================================================================
+
+clean: clean_sim clean_synth
+	rm -rf $(BUILD_DIR)
+
+clean_sim:
+	rm -rf $(SIM_DIR)
+	rm -f $(TB_DIR)/*.vvp
+
+clean_synth:
+	rm -rf $(SYNTH_DIR)

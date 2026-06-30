@@ -1,0 +1,52 @@
+# Vivado artifacts
+*.jou
+*.log
+*.str
+*.rpt
+*.pb
+*.wdb
+*.wpc
+*.xml
+*.html
+*.htm
+*.css
+*.js
+*.zip
+*.bak
+*.backup
+
+# Vivado project directories
+*.xpr
+*.cache/
+*.hw/
+*.runs/
+*.sim/
+*.srcs/
+*.gen/
+*.ip_user_files/
+.Xil/
+
+# Synthesis/simulation build artifacts
+build/
+*.vvp
+*.vcd
+*.lxt
+*.fst
+*.dump
+
+# Bitstreams (uncomment if you don't want to track bitfiles in git)
+# *.bit
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Editor
+*.swp
+*.swo
+*~
+.DS_Store
+
+# OS
+Thumbs.db
