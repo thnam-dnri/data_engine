@@ -36,7 +36,11 @@ foreach f [concat \
     [glob -nocomplain $src_dir/*/*.v]  \
     [glob -nocomplain $src_dir/top_*.sv] \
 ] {
-    read_verilog [file extension $f] $f
+    if {[file extension $f] eq ".sv"} {
+        read_verilog -sv $f
+    } else {
+        read_verilog $f
+    }
 }
 
 # --- Read constraint files ---

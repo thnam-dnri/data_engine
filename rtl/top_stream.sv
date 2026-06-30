@@ -172,27 +172,29 @@ module top_stream (
     );
 
     // =========================================================================
-    // Channel select + decimator (1:32)
-    // Selected channel data (lower 16 bits = ch_a when channel_sel=0)
-    wire [15:0] sample_raw = channel_sel ? cdc_dout[31:16] : cdc_dout[15:0];
+    // Decimator (1:32) — captures BOTH channels per decimated pair
+    // 4 bytes on wire per pair: ch_a[7:0], ch_a[15:8], ch_b[7:0], ch_b[15:8]
+    // (channel_sel mux is unused in this build but kept for future channel-only mode)
     wire        sample_avail = ~cdc_empty;
 
     reg [4:0]  dec_cnt;
     reg        dec_sample_valid;
-    reg [15:0] dec_sample;
+    reg [15:0] dec_ch_a, dec_ch_b;
 
     always @(posedge sys_clk or negedge rst_n) begin
         if (!rst_n) begin
             dec_cnt           <= 5'd0;
             dec_sample_valid  <= 1'b0;
-            dec_sample        <= 16'd0;
+            dec_ch_a          <= 16'd0;
+            dec_ch_b          <= 16'd0;
         end else begin
             dec_sample_valid <= 1'b0;  // default: pulse
 
             if (sample_avail) begin
                 if (dec_cnt == 5'd0) begin
-                    // Take this sample
-                    dec_sample       <= sample_raw;
+                    // Latch BOTH channels on the same decimation event
+                    dec_ch_a         <= cdc_dout[15:0];
+                    dec_ch_b         <= cdc_dout[31:16];
                     dec_sample_valid <= 1'b1;
                 end
                 dec_cnt <= dec_cnt + 1'b1;
@@ -232,47 +234,59 @@ module top_stream (
     );
 
     // =========================================================================
-    // TX byte sequencer: pack 16-bit sample → 2 bytes LE (LSB first)
+    // TX byte sequencer: pack {ch_a, ch_b} → 4 bytes LE
+    //   byte 0: ch_a[7:0]    byte 1: ch_a[15:8]
+    //   byte 2: ch_b[7:0]    byte 3: ch_b[15:8]
     // =========================================================================
-    localparam TX_IDLE = 2'd0,
-               TX_LSB  = 2'd1,
-               TX_MSB  = 2'd2;
+    localparam [2:0] TX_IDLE  = 3'd0,
+                     TX_A_LSB = 3'd1,
+                     TX_A_MSB = 3'd2,
+                     TX_B_LSB = 3'd3,
+                     TX_B_MSB = 3'd4;
 
-    reg [1:0] tx_state;
-    reg [7:0] tx_lsb;
+    reg [2:0] tx_state;
+    reg [7:0] tx_byte0;  // LSB of ch_a, latched on TX_IDLE → TX_A_LSB
 
     always @(posedge sys_clk or negedge rst_n) begin
         if (!rst_n) begin
             tx_state <= TX_IDLE;
-            tx_lsb   <= 8'd0;
+            tx_byte0 <= 8'd0;
         end else begin
             case (tx_state)
                 TX_IDLE: begin
                     if (dec_sample_valid) begin
-                        tx_lsb   <= dec_sample[7:0];
-                        tx_state <= TX_LSB;
+                        tx_byte0 <= dec_ch_a[7:0];
+                        tx_state <= TX_A_LSB;
                     end
                 end
 
-                TX_LSB: begin
-                    if (dpti_tx_rdy) begin
-                        tx_state <= TX_MSB;
-                    end
+                TX_A_LSB: begin
+                    if (dpti_tx_rdy) tx_state <= TX_A_MSB;
                 end
 
-                TX_MSB: begin
-                    if (dpti_tx_rdy) begin
-                        tx_state <= TX_IDLE;
-                    end
+                TX_A_MSB: begin
+                    if (dpti_tx_rdy) tx_state <= TX_B_LSB;
                 end
+
+                TX_B_LSB: begin
+                    if (dpti_tx_rdy) tx_state <= TX_B_MSB;
+                end
+
+                TX_B_MSB: begin
+                    if (dpti_tx_rdy) tx_state <= TX_IDLE;
+                end
+
+                default: tx_state <= TX_IDLE;
             endcase
         end
     end
 
-    assign dpti_tx_data = (tx_state == TX_MSB) ? dec_sample[15:8] :
-                          (tx_state == TX_LSB) ? tx_lsb :
-                          8'd0;
-    assign dpti_tx_wr   = (tx_state == TX_LSB || tx_state == TX_MSB);
+    assign dpti_tx_data = (tx_state == TX_A_LSB) ? tx_byte0         :
+                          (tx_state == TX_A_MSB) ? dec_ch_a[15:8]   :
+                          (tx_state == TX_B_LSB) ? dec_ch_b[7:0]    :
+                          (tx_state == TX_B_MSB) ? dec_ch_b[15:8]   :
+                                                   8'd0;
+    assign dpti_tx_wr   = (tx_state != TX_IDLE);
 
     // =========================================================================
     // RX: ignore incoming commands in Phase 1 streaming mode

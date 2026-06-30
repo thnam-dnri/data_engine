@@ -52,14 +52,15 @@ module cdc_fifo (
     // xpm_fifo_async instantiation (synthesis) / behavioral model (sim)
     // =========================================================================
 
+    localparam DEPTH = 64;
+    localparam AW    = 6;  // log2(DEPTH)
+
 `ifndef SYNTHESIS
     // -----------------------------------------------------------------------
     // Behavioral FIFO model for iverilog simulation
     // Depth = 64, FWFT read mode, 32-bit data width
     // Uses pointer-based full/empty detection (simplified for sim)
     // -----------------------------------------------------------------------
-    localparam DEPTH = 64;
-    localparam AW    = 6;  // log2(DEPTH)
 
     reg [31:0] mem [0:DEPTH-1];
     reg [AW:0]  wr_ptr = 0;   // MSB wrap bit for full/empty detection
