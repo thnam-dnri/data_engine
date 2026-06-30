@@ -136,11 +136,13 @@ module top_stream (
     wire        adc_data_valid;
     wire        channel_sel = 1'b0;  // Phase 1: always channel A
 
-    dbg_if adc_dbg ();  // debug port (unused in Phase 1 top)
+    wire        adc_dco_bufg;
 
     adc_interface u_adc_interface (
         .adc_dco      (adc_dco),
+        .sys_clk      (sys_clk),
         .sys_rst_n    (rst_n),
+        .dco_clk_out  (adc_dco_bufg),
         .adc_data     (adc_data),
         .ch_a_data    (adc_ch_a),
         .ch_b_data    (adc_ch_b),
@@ -150,15 +152,13 @@ module top_stream (
     );
 
     // =========================================================================
-    // CDC FIFO — adc_dco → sys_clk (32-bit packed dual-channel)
+    // CDC FIFO — dco_clk → sys_clk (32-bit packed dual-channel)
     // =========================================================================
     wire        cdc_full, cdc_empty;
     wire [31:0] cdc_dout;
 
-    dbg_if cdc_dbg ();
-
     cdc_fifo u_cdc_fifo (
-        .wr_clk   (adc_dco),        // note: uses unbuffered adc_dco directly
+        .wr_clk   (adc_dco_bufg),   // BUFG'd dco_clk (matches adc_interface output registers)
         .wr_rst_n (rst_n),
         .wr_en    (adc_data_valid),
         .din      ({adc_ch_b, adc_ch_a}),  // {ch_b[15:0], ch_a[15:0]}
@@ -173,7 +173,6 @@ module top_stream (
 
     // =========================================================================
     // Channel select + decimator (1:32)
-    // =========================================================================
     // Selected channel data (lower 16 bits = ch_a when channel_sel=0)
     wire [15:0] sample_raw = channel_sel ? cdc_dout[31:16] : cdc_dout[15:0];
     wire        sample_avail = ~cdc_empty;

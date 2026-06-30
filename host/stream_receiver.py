@@ -22,27 +22,19 @@ import sys
 try:
     from pyftdi.ftdi import Ftdi
     from pyftdi.usbtools import UsbTools
-    HAS_PYFTDI = False  # Will be True once proper device detection is implemented
+    HAS_PYFTDI = True
 except ImportError:
     HAS_PYFTDI = False
 
 
 def find_ft232h():
-    """Find the FT232H device. Returns (vid, pid) or raises RuntimeError."""
-    # Common FT232H VID/PID
-    VENDORS = [
-        (0x0403, 0x6014),  # FTDI FT232H
-        (0x0403, 0x6010),  # FTDI FT2232H
-        (0x0403, 0x6011),  # FTDI FT4232H
-    ]
-    try:
-        dev_list = UsbTools.find_all(UsbTools, skip_imperative=True)
-        for desc in dev_list:
-            vid_pid = (desc.vid, desc.pid)
-            if vid_pid in VENDORS:
-                return vid_pid
-    except Exception:
-        pass
+    """Find the FT232H device. Returns Ftdi controller or raises RuntimeError."""
+    from pyftdi.ftdi import Ftdi
+    ftdi_list = Ftdi().find_all([(0x0403, 0x6014), (0x0403, 0x6010), (0x0403, 0x6011)])
+    for desc in ftdi_list:
+        ftdi = Ftdi()
+        ftdi.open(desc.vid, desc.pid, desc.index)
+        return ftdi
     raise RuntimeError("No FT232H/FT2232H found. Check USB connection.")
 
 
@@ -78,23 +70,88 @@ def stream_test(duration_s=10):
         return
     
     try:
-        vid, pid = find_ft232h()
-        print(f"Found FT232H: VID={vid:04x} PID={pid:04x}")
+        ftdi = find_ft232h()
+        print(f"Found FT232H: VID={ftdi.vid:04x} PID={ftdi.pid:04x}")
+        
+        # Configure for synchronous FIFO mode
+        ftdi.set_bitmode(0xFF, 0x40)  # 0x40 = sync FIFO mode
+        ftdi.write_data_set_chunksize(64 * 1024)
+        
+        # Read stream
+        print("Opening DPTI interface in sync FIFO mode...")
+        print()
+        _stream_from_hardware(ftdi, duration_s)
+        ftdi.close()
     except RuntimeError as e:
         print(f"ERROR: {e}")
         print()
         print("Running simulation mode with dummy data...")
         _simulate_stream(duration_s)
         return
-    
-    # Open DPTI interface
-    # In a real implementation, this would use pyftdi's Ftdi
-    # to open the device in synchronous FIFO mode.
-    print("Opening DPTI interface...")
+    except Exception as e:
+        print(f"ERROR during FTDI operation: {e}")
+        print()
+        print("Running simulation mode with dummy data...")
+        _simulate_stream(duration_s)
+
+
+def _stream_from_hardware(ftdi, duration_s):
+    """Read ADC stream from FT232H sync FIFO."""
+    print("--- Hardware Stream ---")
+    bytes_read = 0
+    sample_min = 0xFFFF
+    sample_max = 0
+    sample_sum = 0
+    sample_count = 0
+    start = time.time()
+
+    while time.time() - start < duration_s:
+        elapsed = time.time() - start
+        # Read up to 64 KB at a time
+        data = ftdi.read_data(65536)
+        if data:
+            bytes_read += len(data)
+            samples = parse_samples(data)
+            for s in samples:
+                sample_min = min(sample_min, s)
+                sample_max = max(sample_max, s)
+                sample_sum += s
+                sample_count += 1
+
+        # Print progress every second
+        if int(elapsed) > int(elapsed - 0.1) if False else (int(elapsed) != int(elapsed - 0.1)):
+            current_rate = bytes_read / max(elapsed, 0.001)
+            avg_sample = sample_sum / max(sample_count, 1)
+            print(f"\r  Elapsed: {elapsed:.1f}s  "
+                  f"Rate: {current_rate/1e6:.2f} MB/s  "
+                  f"Samples: {sample_count}  "
+                  f"Min: {sample_min}  Max: {sample_max}  "
+                  f"Avg: {avg_sample:.1f}  ", end="", flush=True)
+
+    elapsed = time.time() - start
+    rate = bytes_read / max(elapsed, 0.001)
+    avg_sample = sample_sum / max(sample_count, 1)
+
     print()
-    print("(Real FT232H access requires pyftdi with proper configuration)")
     print()
-    _simulate_stream(duration_s)
+    print("--- Results ---")
+    print(f"  Duration:     {elapsed:.1f} s")
+    print(f"  Bytes read:   {bytes_read} ({bytes_read/1e6:.2f} MB)")
+    print(f"  Throughput:   {rate/1e6:.2f} MB/s")
+    print(f"  Samples:      {sample_count}")
+    print(f"  Sample range: {sample_min} – {sample_max}")
+    print(f"  Sample mean:  {avg_sample:.1f}")
+
+    # Check: mid-code ~8192 for 14-bit ADC with floating input
+    mid_code = 8192
+    if abs(avg_sample - mid_code) < 500:
+        print(f"\n  OK: ADC data appears valid (mean near mid-code {mid_code})")
+    else:
+        print(f"\n  WARN: Sample mean ({avg_sample:.0f}) differs from mid-code ({mid_code})")
+        print(f"    (Expected for real ADC with floating input)")
+
+    print()
+    print("Hardware stream test complete.")
 
 
 def _simulate_stream(duration_s):

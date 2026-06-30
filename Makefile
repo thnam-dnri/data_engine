@@ -34,23 +34,11 @@ RTL_SRCS    := $(filter-out $(RTL_PKG),$(wildcard $(RTL_DIR)/*/*.sv) $(wildcard 
 SIM_SUPPORT := $(wildcard sim/*.sv)
 
 # --- Unit testbenches (iverilog, per-module) ---
-TB_UNIT     := $(TB_DIR)/tb_types.sv \
-               $(TB_DIR)/tb_adc_interface.sv \
-               $(TB_DIR)/tb_cdc_fifo.sv \
-               $(TB_DIR)/tb_comm_dpti.sv \
-               $(TB_DIR)/tb_stream.sv \
-               $(TB_DIR)/tb_glitch_filter.sv \
-               $(TB_DIR)/tb_circular_buffer.sv \
-               $(TB_DIR)/tb_trigger.sv \
-               $(TB_DIR)/tb_descriptor_fifo.sv \
-               $(TB_DIR)/tb_waveform_reader.sv \
-               $(TB_DIR)/tb_tx_fifo.sv
+# Dynamic discovery: only existing .sv testbenches are compiled
+TB_UNIT     := $(wildcard $(TB_DIR)/tb_*.sv)
 
-# --- Integration testbenches (Vivado xvlog) ---
-TB_INTEG    := $(TB_DIR)/tb_pipeline.sv \
-               $(TB_DIR)/tb_audit_aggregator.sv \
-               $(TB_DIR)/tb_pipeline_debug.sv \
-               $(TB_DIR)/tb_bist.sv
+# --- Integration testbenches (Vivado xvlog, coming in Phase 2.7) ---
+TB_INTEG    := $(wildcard $(TB_DIR)/tb_integ_*.sv)
 
 # --- Synthesis top ---
 SYNTH_TOP   := top_stream

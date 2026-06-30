@@ -24,6 +24,9 @@ module tb_adc_interface;
     // =========================================================================
     // Clock generation
     // =========================================================================
+    reg sys_clk = 0;
+    always #5 sys_clk = ~sys_clk;      // 100 MHz
+
     reg adc_dco = 0;
     always #4.762 adc_dco = ~adc_dco;  // ~105 MHz
 
@@ -40,6 +43,7 @@ module tb_adc_interface;
     // DUT
     adc_interface u_dut (
         .adc_dco     (adc_dco),
+        .sys_clk     (sys_clk),
         .sys_rst_n   (sys_rst_n),
         .adc_data    (adc_data),
         .ch_a_data   (ch_a_data),

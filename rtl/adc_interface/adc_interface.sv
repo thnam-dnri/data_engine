@@ -27,7 +27,9 @@ import dbg_pkg::*;
 module adc_interface (
     // --- Clock & Reset ---
     input  wire       adc_dco,         // AD9648 data clock output (LVCMOS18)
+    input  wire       sys_clk,         // system clock (100 MHz) for DCO watchdog
     input  wire       sys_rst_n,       // system reset (async, active-low)
+    output wire       dco_clk_out,     // BUFG'd DCO clock for downstream CDC
 
     // --- ADC Data Bus ---
     input  wire [13:0] adc_data,       // interleaved 14-bit CMOS bus
@@ -49,38 +51,78 @@ module adc_interface (
     // =========================================================================
     wire dco_clk;
     BUFG u_dco_bufg (.I(adc_dco), .O(dco_clk));
+    assign dco_clk_out = dco_clk;
 
     // =========================================================================
-    // DCO lock detection
+    // DCO lock detection (cross-domain: dco_clk + sys_clk)
     // =========================================================================
-    // A simple activity monitor: if DCO toggles at least once within a timeout
-    // window (~1 us @ 100 MHz), we consider it locked. DCO is ~105 MHz, so a
-    // 100-cycle timeout (1 us) is more than enough to detect a toggle.
-    localparam DCO_LOCK_TIMEOUT = 16'd100;
+    // Why crossing domains? A stopped clock cannot be detected within its own
+    // domain, so we use sys_clk as a watchdog reference.
+    //
+    // ─ On dco_clk: free-running toggle flips every cycle
+    // ─ On sys_clk: 2-stage sync the toggle; if it stops changing for
+    //   DCO_LOCK_TIMEOUT sys_clk cycles, DCO is declared lost.
+    //
+    // The locked signal is then CDC'd back to dco_clk (1-bit, CDC-safe).
+    // =========================================================================
+    localparam DCO_LOCK_TIMEOUT = 16'd100;  // ~1 us @ 100 MHz
 
-    reg [15:0] dco_toggle_cnt;     // counts clk cycles since last DCO toggle
-    reg        dco_toggle_detected; // sticky: did DCO toggle this window?
-    reg        dco_toggle_prev;     // previous DCO value (for edge detect)
-
-    // DCO edge detect and lock status
+    // --- dco_clk domain: free-running toggle ---
+    reg dco_toggle;
     always @(posedge dco_clk or negedge sys_rst_n) begin
+        if (!sys_rst_n) dco_toggle <= 1'b0;
+        else            dco_toggle <= ~dco_toggle;
+    end
+
+    // --- sys_clk domain: 2-stage sync + watchdog ---
+    reg dco_toggle_s1, dco_toggle_s2, dco_toggle_s3;
+    reg [15:0] dco_watchdog;
+    reg        dco_locked_sys;    // sys_clk domain
+    reg        dco_lost_sys;      // sys_clk domain
+
+    always @(posedge sys_clk or negedge sys_rst_n) begin
         if (!sys_rst_n) begin
-            dco_toggle_cnt     <= 16'd0;
-            dco_toggle_detected <= 1'b0;
-            dco_toggle_prev    <= 1'b0;
+            dco_toggle_s1 <= 1'b0;
+            dco_toggle_s2 <= 1'b0;
+            dco_toggle_s3 <= 1'b0;
+            dco_watchdog  <= 16'd0;
+            dco_locked_sys <= 1'b0;
+            dco_lost_sys   <= 1'b0;
         end else begin
-            dco_toggle_prev <= adc_dco;
-            // Detect toggle on DCO
-            if (adc_dco != dco_toggle_prev) begin
-                dco_toggle_detected <= 1'b1;
-                dco_toggle_cnt     <= 16'd0;
-            end else if (dco_toggle_cnt < DCO_LOCK_TIMEOUT) begin
-                dco_toggle_cnt <= dco_toggle_cnt + 1'b1;
+            dco_toggle_s1 <= dco_toggle;
+            dco_toggle_s2 <= dco_toggle_s1;
+            dco_toggle_s3 <= dco_toggle_s2;
+
+            if (dco_toggle_s2 != dco_toggle_s3) begin
+                // Toggle changed — DCO is active. Reset watchdog.
+                dco_watchdog  <= 16'd0;
+                dco_locked_sys <= 1'b1;
+                dco_lost_sys   <= 1'b0;
+            end else if (dco_watchdog < DCO_LOCK_TIMEOUT) begin
+                dco_watchdog <= dco_watchdog + 1'b1;
+            end else begin
+                // Watchdog expired — DCO has stopped
+                dco_locked_sys <= 1'b0;
+                if (dco_locked_sys) begin
+                    // Was locked, now lost
+                    dco_lost_sys <= 1'b1;
+                end
             end
         end
     end
 
-    wire dco_locked = dco_toggle_detected;
+    // CDC back to dco_clk domain (1-bit, 2-stage sync)
+    reg dco_locked_s1, dco_locked_s2;
+    always @(posedge dco_clk or negedge sys_rst_n) begin
+        if (!sys_rst_n) begin
+            dco_locked_s1 <= 1'b0;
+            dco_locked_s2 <= 1'b0;
+        end else begin
+            dco_locked_s1 <= dco_locked_sys;
+            dco_locked_s2 <= dco_locked_s1;
+        end
+    end
+    wire dco_locked = dco_locked_s2;
 
     // =========================================================================
     // IDDR instantiations (14 bits × SAME_EDGE_PIPELINED)
@@ -97,7 +139,7 @@ module adc_interface (
                 .Q1 (ch_a_iddr[gi]),   // rising edge → Channel A
                 .Q2 (ch_b_iddr[gi]),   // falling edge → Channel B
                 .C  (dco_clk),
-                .CE (dco_locked),
+                .CE (1'b1),            // always enabled; DCO lock only affects debug
                 .D  (adc_data[gi]),
                 .R  (1'b0),
                 .S  (1'b0)
@@ -144,22 +186,20 @@ module adc_interface (
     localparam ST_DEINTERLEAVE_ACT  = 4'd2;
     localparam ST_DCO_LOST          = 4'd3;
 
-    // DCO loss detection: if DCO stops toggling, re-enter unlock
-    reg dco_lost;
+    // --- CDC dco_lost_sys → dco_clk domain ---
+    reg dco_lost_s1, dco_lost_s2;
     always @(posedge dco_clk or negedge sys_rst_n) begin
         if (!sys_rst_n) begin
-            dco_lost <= 1'b0;
+            dco_lost_s1 <= 1'b0;
+            dco_lost_s2 <= 1'b0;
         end else begin
-            // If DCO hasn't toggled for > timeout, declare lost
-            if (dco_toggle_cnt >= DCO_LOCK_TIMEOUT && dco_toggle_detected) begin
-                dco_lost <= 1'b1;
-            end else if (dco_locked) begin
-                dco_lost <= 1'b0;
-            end
+            dco_lost_s1 <= dco_lost_sys;
+            dco_lost_s2 <= dco_lost_s1;
         end
     end
+    wire dco_lost = dco_lost_s2;
 
-    // State machine
+    // State machine (dco_clk domain)
     always @(posedge dco_clk or negedge sys_rst_n) begin
         if (!sys_rst_n) begin
             dbg_state       <= ST_IDLE;
@@ -206,9 +246,6 @@ module adc_interface (
             if (dco_lost) begin
                 dbg_error    <= 1'b1;
                 dbg_error_id <= 8'd1;  // DCO_lost
-            end else if (dbg_error && dbg_error_id == 8'd1) begin
-                // Clear only when COMMON_1 write-1-to-clear is applied
-                // (handled by audit aggregator; for now, sticky remains)
             end
 
             // Event counter: count valid samples
@@ -219,7 +256,7 @@ module adc_interface (
         end
     end
 
-    // driv dbg_info output (positional concatenation for iverilog compat)
+    // drive dbg_info output (positional concatenation for iverilog compat)
     assign dbg_info = {
         dbg_state,           // [127:124]  4 bits
         dbg_cycle_count,     // [123:108] 16 bits
