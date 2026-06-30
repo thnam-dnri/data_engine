@@ -26,8 +26,12 @@ VIVADO_MODE := -mode batch
 HW_SERVER   := $(HOME)/Xilinx/2026.1/Vivado_Lab/bin/hw_server
 
 # --- RTL source files (auto-collected) ---
+# Packages are compiled separately from other RTL sources to avoid double-compilation
 RTL_PKG     := $(wildcard $(RTL_DIR)/pkg/*.sv)
-RTL_SRCS    := $(wildcard $(RTL_DIR)/*/*.sv) $(RTL_DIR)/top_stream.sv $(RTL_DIR)/top_pipeline.sv $(RTL_DIR)/top.sv
+RTL_SRCS    := $(filter-out $(RTL_PKG),$(wildcard $(RTL_DIR)/*/*.sv) $(wildcard $(RTL_DIR)/*/*.v)) $(wildcard $(RTL_DIR)/top_*.sv)
+
+# --- Simulation support files (Xilinx primitive models) ---
+SIM_SUPPORT := $(wildcard sim/*.sv)
 
 # --- Unit testbenches (iverilog, per-module) ---
 TB_UNIT     := $(TB_DIR)/tb_types.sv \
@@ -77,10 +81,10 @@ help:
 sim_unit: $(shell ls $(TB_DIR)/tb_*.sv 2>/dev/null | sed 's/\.sv$$/.vvp/')
 
 # Pattern rule: compile each .sv testbench to .vvp with iverilog
-%.vvp: %.sv $(RTL_PKG)
+%.vvp: %.sv $(RTL_PKG) $(SIM_SUPPORT)
 	@mkdir -p $(SIM_DIR)/unit
 	@echo "=== Compiling $< with iverilog ==="
-	$(IVERILOG) -g2012 -o $@ $(RTL_PKG) $< 2>&1 | tee $(SIM_DIR)/unit/$(notdir $@).log
+	$(IVERILOG) -g2012 -o $@ $(RTL_PKG) $(SIM_SUPPORT) $(RTL_SRCS) $< 2>&1 | tee $(SIM_DIR)/unit/$(notdir $@).log
 	@echo "=== Running $@ ==="
 	$(VVP) $@ 2>&1 | tee -a $(SIM_DIR)/unit/$(notdir $@).log
 
