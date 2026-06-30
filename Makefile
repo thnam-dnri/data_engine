@@ -74,13 +74,13 @@ help:
 #       Unit testbenches should use packed structs directly, not interfaces.
 # =============================================================================
 
-sim_unit: $(TB_UNIT:.sv=.vvp)
+sim_unit: $(shell ls $(TB_DIR)/tb_*.sv 2>/dev/null | sed 's/\.sv$$/.vvp/')
 
 # Pattern rule: compile each .sv testbench to .vvp with iverilog
 %.vvp: %.sv $(RTL_PKG)
 	@mkdir -p $(SIM_DIR)/unit
 	@echo "=== Compiling $< with iverilog ==="
-	$(IVERILOG) -g2012 -o $@ $< $(RTL_PKG) 2>&1 | tee $(SIM_DIR)/unit/$(notdir $@).log
+	$(IVERILOG) -g2012 -o $@ $(RTL_PKG) $< 2>&1 | tee $(SIM_DIR)/unit/$(notdir $@).log
 	@echo "=== Running $@ ==="
 	$(VVP) $@ 2>&1 | tee -a $(SIM_DIR)/unit/$(notdir $@).log
 

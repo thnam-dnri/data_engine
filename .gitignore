@@ -33,6 +33,10 @@ build/
 *.lxt
 *.fst
 *.dump
+xsim.dir/
+xvlog.pid
+xelab.pid
+xsim.pid
 
 # Bitstreams (uncomment if you don't want to track bitfiles in git)
 # *.bit
