@@ -75,7 +75,12 @@ module adc_interface (
     end
 
     // --- sys_clk domain: 2-stage sync + watchdog ---
-    reg dco_toggle_s1, dco_toggle_s2, dco_toggle_s3;
+    // ASYNC_REG marks the synchronizer chain: placer keeps these flops close
+    // for metastability resolution and the async input path is exempted from
+    // intra-clock hold tightening (fixes the -0.017ns hold on s1->s2).
+    (* ASYNC_REG = "TRUE" *) reg dco_toggle_s1;
+    (* ASYNC_REG = "TRUE" *) reg dco_toggle_s2;
+    (* ASYNC_REG = "TRUE" *) reg dco_toggle_s3;
     reg [15:0] dco_watchdog;
     reg        dco_locked_sys;    // sys_clk domain
     reg        dco_lost_sys;      // sys_clk domain

@@ -2,18 +2,30 @@
 #
 # Called by: make synth
 # Sources: hw_spec pin XDC + constraints/timing.xdc
-# Top: top_stream (Phase 1)
+# Top: defaults to top_pipeline (Phase 2.7+); override with `make synth TOP=top_stream`
+#      (Makefile exports TOP as env var; synth.tcl picks it up via $::env(TOP)).
+#      Also accepts positional argv: `vivado -source synth.tcl -- top_stream`.
 #
 # Outputs under build/synth/:
-#   synth.tcl/         — synthesis checkpoint + reports
-#   top_stream.runs/   — impl runs (place, route, timing)
-#   top_stream.bit     — final bitstream
+#   synth.dcp          — synthesis checkpoint
+#   routed.dcp         — post-route checkpoint
+#   <top>.bit          — final bitstream
 #   timing_summary.rpt — post-route timing
 #   utilization.rpt    — LUT/FF/BRAM utilization
 #   drc.rpt            — DRC violations
 
 # --- Project settings ---
-set top_name   top_stream
+# Top name resolution order:
+#   1. $::env(TOP)  — set by `make synth TOP=<name>`
+#   2. $argv        — `vivado -source synth.tcl -- <name>` (after `--`)
+#   3. default      — top_pipeline
+if {[info exists ::env(TOP)] && $::env(TOP) ne ""} {
+    set top_name $::env(TOP)
+} elseif {[llength $argv] > 0} {
+    set top_name [lindex $argv 0]
+} else {
+    set top_name top_pipeline
+}
 set part       xc7a100tcsg324-1
 set src_dir    [file normalize [file dirname [info script]]/../rtl]
 set spec_dir   [file normalize [file dirname [info script]]/../hardware_spec]
@@ -78,6 +90,7 @@ write_bitstream -force -file [file join $output_dir ${top_name}.bit]
 puts ""
 puts "============================================================"
 puts " Synthesis + Implementation complete."
+puts " Top:       $top_name"
 puts " Bitstream: [file join $output_dir ${top_name}.bit]"
 puts " Reports:   $output_dir/"
 puts "============================================================"

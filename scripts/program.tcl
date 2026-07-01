@@ -1,12 +1,20 @@
 # program.tcl — Program data_engine bitstream to FPGA via hw_server
 #
-# Called by: make program
+# Called by: make program [TOP=<name>]
 # Pre-req:  hw_server running (Makefile starts it if not)
-# Bitstream: build/synth/top_stream.bit
+# Bitstream: build/synth/<top>.bit (defaults to top_pipeline, override with TOP env)
 #
 # Uses the on-board FT232H USB-JTAG channel (Digilent USB104 A7).
 
-set bit_file [file normalize [file dirname [info script]]/../build/synth/top_stream.bit]
+# --- Resolve top name (env TOP > argv > default) ---
+if {[info exists ::env(TOP)] && $::env(TOP) ne ""} {
+    set top_name $::env(TOP)
+} elseif {[llength $argv] > 0} {
+    set top_name [lindex $argv 0]
+} else {
+    set top_name top_pipeline
+}
+set bit_file [file normalize [file dirname [info script]]/../build/synth/${top_name}.bit]
 
 # --- Open hardware manager ---
 open_hw
@@ -48,8 +56,9 @@ puts ""
 puts "============================================================"
 puts " Programmed: $bit_file"
 puts " Device:     $fpga"
+puts " Top:        $top_name"
 puts "============================================================"
-puts " The FPGA is now running top_stream.bit."
+puts " The FPGA is now running ${top_name}.bit."
 puts " Use host/stream_receiver.py to read ADC data over DPTI/USB."
 puts "============================================================"
 

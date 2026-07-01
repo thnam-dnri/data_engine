@@ -15,6 +15,10 @@
 //   9. Dual-clock: separate wr_clk and rd_clk, basic CDC
 //  10. dbg_if fields
 //  11. Reset clears counters
+//
+// Note: write port has 1-cycle pipeline latency (registered wr_data/wr_addr
+// to fix hold violation). do_write() waits 1 extra wr_clk cycle after the
+// strobe so subsequent checks see the data in the BRAM.
 //------------------------------------------------------------------------------
 
 `timescale 1ns / 1ps
@@ -93,15 +97,19 @@ module tb_tx_fifo;
         end
     endtask
 
-    // Write one word (synchronous to wr_clk) and wait for CDC propagation
+    // Write one word (synchronous to wr_clk) and wait for CDC propagation.
+    // The FIFO write port has 1-cycle pipeline latency (wr_data and
+    // wr_addr are registered), so we wait 1 extra wr_clk after the strobe
+    // before checking results.
     task do_write(input [WIDTH-1:0] data);
         begin
             @(negedge wr_clk);
             wr_req  = 1'b1;
             wr_data = data;
-            @(posedge wr_clk);    // write happens here
+            @(posedge wr_clk);    // wr_data/wr_addr registered here
             @(negedge wr_clk);
             wr_req  = 1'b0;
+            @(posedge wr_clk);    // wait for BRAM write to complete
             // Wait for 2-FF synchroniser to propagate wr_ptr_gray to rd_clk
             repeat (3) @(posedge rd_clk);
         end
@@ -156,7 +164,7 @@ module tb_tx_fifo;
     // -------------------------------------------------------------------------
     initial begin
         $display("========================================================================");
-        $display("  tb_tx_fifo — Phase 2.6");
+        $display("  tb_tx_fifo — Phase 2.6 (with 1-cycle write pipeline)");
         $display("========================================================================");
         $display("");
 

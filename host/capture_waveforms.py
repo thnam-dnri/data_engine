@@ -86,7 +86,7 @@ def parse_pairs(data_bytes):
     return np.column_stack([ch_a, ch_b])
 
 
-def detect_pulse_starts(samples, channel=0, threshold=500,
+def detect_pulse_starts(samples, channel=0, threshold=500, polarity="negative",
                         min_distance=500, pre_samples=600, post_samples=1200,
                         n_waveforms=1000):
     """
@@ -95,7 +95,8 @@ def detect_pulse_starts(samples, channel=0, threshold=500,
     Args:
         samples: 1D array of sample values
         channel: which channel (0=ch_a, 1=ch_b)
-        threshold: threshold above baseline for trigger
+        threshold: threshold away from baseline for trigger
+        polarity: "negative" for ADC-inverted falling pulses, "positive" for rising pulses
         min_distance: minimum samples between triggers
         pre_samples: samples before trigger to include
         post_samples: samples after trigger to include
@@ -106,13 +107,23 @@ def detect_pulse_starts(samples, channel=0, threshold=500,
     baseline = np.median(samples[:2000])  # first 2000 samples as baseline
     print(f"  Baseline (median of first 2000 samples): {baseline}")
 
-    above = samples > (baseline + threshold)
+    if polarity == "negative":
+        crossed = samples < (baseline - threshold)
+        edge_name = "falling"
+        threshold_desc = f"baseline - {threshold}"
+    elif polarity == "positive":
+        crossed = samples > (baseline + threshold)
+        edge_name = "rising"
+        threshold_desc = f"baseline + {threshold}"
+    else:
+        raise ValueError("polarity must be 'negative' or 'positive'")
+
     triggers = []
 
     i = 0
-    while i < len(above) - 1 and len(triggers) < n_waveforms:
-        # Find rising edge
-        if not above[i] and above[i + 1]:
+    while i < len(crossed) - 1 and len(triggers) < n_waveforms:
+        # Find threshold crossing edge
+        if not crossed[i] and crossed[i + 1]:
             trigger_idx = i + 1
 
             # Check we have enough pre/post samples
@@ -128,7 +139,7 @@ def detect_pulse_starts(samples, channel=0, threshold=500,
 
         i += 1
 
-    print(f"  Found {len(triggers)} pulse starts (threshold above baseline + {threshold})")
+    print(f"  Found {len(triggers)} {edge_name}-edge pulse starts ({threshold_desc})")
     return triggers
 
 
@@ -169,7 +180,7 @@ def capture(duration_s=2):
     return bytes(all_data)
 
 
-def extract_waveforms(raw_bytes, channel=0, threshold=500,
+def extract_waveforms(raw_bytes, channel=0, threshold=500, polarity="negative",
                       n_waveforms=1000, pre=600, post=1200,
                       rate_msps=DEFAULT_RATE_MSPS):
     """
@@ -188,7 +199,7 @@ def extract_waveforms(raw_bytes, channel=0, threshold=500,
 
     print(f"Detecting pulses on {ch_label}...")
     triggers = detect_pulse_starts(
-        ch, channel=channel, threshold=threshold,
+        ch, channel=channel, threshold=threshold, polarity=polarity,
         min_distance=pre + post - 200,  # prevent overlap
         pre_samples=pre, post_samples=post,
         n_waveforms=n_waveforms
@@ -293,7 +304,10 @@ def main():
     parser.add_argument("--channel", type=int, choices=[0, 1], default=0,
                        help="Channel to analyse (0=CH-A, 1=CH-B, default: 0)")
     parser.add_argument("--threshold", type=int, default=500,
-                       help="Rising-edge threshold above baseline (default: 500)")
+                       help="Threshold away from baseline in ADC counts (default: 500)")
+    parser.add_argument("--polarity", choices=["negative", "positive"],
+                       default="negative",
+                       help="Pulse polarity after ADC (default: negative for inverted positive input)")
     parser.add_argument("--n-waveforms", type=int, default=1000,
                        help="Number of waveforms to collect (default: 1000)")
     parser.add_argument("--rate-msps", type=float, default=DEFAULT_RATE_MSPS,
@@ -328,6 +342,7 @@ def main():
         print(f"  Channel:    CH-{'A' if args.channel == 0 else 'B'}")
         print(f"  Duration:   {args.duration}s")
         print(f"  Threshold:  {args.threshold}")
+        print(f"  Polarity:   {args.polarity}")
         print(f"  Waveforms:  {args.n_waveforms}")
         print()
 
@@ -343,6 +358,7 @@ def main():
         raw_bytes = load_raw(args.output)
         triggers, pairs = extract_waveforms(
             raw_bytes, channel=args.channel, threshold=args.threshold,
+            polarity=args.polarity,
             n_waveforms=args.n_waveforms,
             pre=WAVEFORM_PRE, post=WAVEFORM_POST,
             rate_msps=args.rate_msps

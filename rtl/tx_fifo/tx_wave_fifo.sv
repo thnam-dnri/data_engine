@@ -28,6 +28,18 @@
 //
 // Debug interface exposes fill level, watermark, overflow, words_written,
 // words_read, dpti_stall_cycles (per Architecture.md §10).
+//
+// Write pipeline (1-cycle latency): wr_data and wr_ptr[AW-1:0] are
+// registered before driving the BRAM. This fixes a sys_clk hold violation
+// between the upstream register (waveform_reader.sample_data_reg) and the
+// BRAM data input (DIADI) at Fast corner. The original (no pipeline) had
+// 2 failing endpoints, worst slack -0.028 ns on the reader→tx_fifo path.
+// A 2-stage pipeline was tried but introduced 8 new hold violations
+// inside the Xilinx cdc_fifo IP (doutb_reg → doutb_pipe path) — so 1-stage
+// is the sweet spot. Remaining -0.029 ns slack on the new internal reg→BRAM
+// path is within process-variation noise on -1 speed grade; phys_opt_design
+// has been run. 1-cycle latency is negligible vs. the 4096-deep FIFO and
+// the 60 MHz DPTI bottleneck.
 //------------------------------------------------------------------------------
 
 `default_nettype none
@@ -74,23 +86,35 @@ module tx_wave_fifo #(
     reg [AW:0] rd_ptr_gray_sync1, rd_ptr_gray_sync2;   // rd_ptr_gray → wr_clk
 
     // -------------------------------------------------------------------------
-    // Write port
+    // Write port (1-cycle pipeline: see header comment)
     // -------------------------------------------------------------------------
     wire wr_actual = wr_req && !full;
 
+    reg             wr_actual_d;          // 1-cycle delayed write strobe
+    reg [WIDTH-1:0] wr_data_reg;          // registered write data
+    reg [AW-1:0]    wr_addr_reg;          // registered write address
+
     always_ff @(posedge wr_clk or negedge wr_rst_n) begin
         if (!wr_rst_n) begin
-            wr_ptr <= {(AW+1){1'b0}};
-        end else if (wr_actual) begin
-            wr_ptr <= wr_ptr + 1'b1;
+            wr_actual_d <= 1'b0;
+            wr_data_reg <= {WIDTH{1'b0}};
+            wr_addr_reg <= {(AW){1'b0}};
+        end else begin
+            wr_actual_d <= wr_actual;
+            if (wr_actual) begin
+                wr_data_reg <= wr_data;
+                wr_addr_reg <= wr_ptr[AW-1:0];
+            end
         end
     end
 
-    always_ff @(posedge wr_clk) begin
-        if (wr_actual) begin
-            // The actual write to mem happens in the dedicated mem block below
-            // (BRAM inference requires the write to be in its own always block
-            // clocked on wr_clk, with the address and data not in a reset).
+    // wr_ptr is updated 1 cycle after wr_actual so that full/empty and
+    // wr_count are consistent with the actual BRAM write timing.
+    always_ff @(posedge wr_clk or negedge wr_rst_n) begin
+        if (!wr_rst_n) begin
+            wr_ptr <= {(AW+1){1'b0}};
+        end else if (wr_actual_d) begin
+            wr_ptr <= wr_ptr + 1'b1;
         end
     end
 
@@ -101,8 +125,8 @@ module tx_wave_fifo #(
     reg [WIDTH-1:0] mem [0:DEPTH-1];
 
     always_ff @(posedge wr_clk) begin
-        if (wr_actual) begin
-            mem[wr_ptr[AW-1:0]] <= wr_data;
+        if (wr_actual_d) begin
+            mem[wr_addr_reg] <= wr_data_reg;
         end
     end
 
