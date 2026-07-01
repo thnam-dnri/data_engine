@@ -29,11 +29,10 @@ except ImportError:
 
 def find_ft232h():
     """Find the FT232H device. Returns Ftdi controller or raises RuntimeError."""
-    from pyftdi.ftdi import Ftdi
-    ftdi_list = Ftdi().find_all([(0x0403, 0x6014), (0x0403, 0x6010), (0x0403, 0x6011)])
-    for desc in ftdi_list:
+    for desc in Ftdi().find_all([(0x0403, 0x6014), (0x0403, 0x6010), (0x0403, 0x6011)]):
+        dev_desc = desc[0]
         ftdi = Ftdi()
-        ftdi.open(desc.vid, desc.pid, desc.index)
+        ftdi.open(dev_desc.vid, dev_desc.pid, dev_desc.bus, dev_desc.address)
         return ftdi
     raise RuntimeError("No FT232H/FT2232H found. Check USB connection.")
 
@@ -71,10 +70,10 @@ def stream_test(duration_s=10):
     
     try:
         ftdi = find_ft232h()
-        print(f"Found FT232H: VID={ftdi.vid:04x} PID={ftdi.pid:04x}")
+        print(f"Found FT232H: VID={ftdi.usb_dev.idVendor:04x} PID={ftdi.usb_dev.idProduct:04x}")
         
         # Configure for synchronous FIFO mode
-        ftdi.set_bitmode(0xFF, 0x40)  # 0x40 = sync FIFO mode
+        ftdi.set_bitmode(0xFF, Ftdi.BitMode.SYNCFF)  # sync FIFO mode
         ftdi.write_data_set_chunksize(64 * 1024)
         
         # Read stream

@@ -74,14 +74,14 @@ set_property SLEW SLOW [get_ports {adc_clk_n}]
 # ANALOG FRONT-END CONTROLS — gain and coupling
 #---------------------------------------------------------------------------
 # Channel 1 AC coupling control (active low)
-set_property PACKAGE_PIN A13 [get_ports {ch1_ac_coupling_h}]
-set_property PACKAGE_PIN A14 [get_ports {ch1_ac_coupling_l}]
-set_property IOSTANDARD LVCMOS18 [get_ports {ch1_ac_coupling_*}]
+set_property PACKAGE_PIN A13 [get_ports {ch1_ac_h}]
+set_property PACKAGE_PIN A14 [get_ports {ch1_ac_l}]
+set_property IOSTANDARD LVCMOS18 [get_ports {ch1_ac_*}]
 
 # Channel 2 AC coupling control
-set_property PACKAGE_PIN B16 [get_ports {ch2_ac_coupling_h}]
-set_property PACKAGE_PIN B17 [get_ports {ch2_ac_coupling_l}]
-set_property IOSTANDARD LVCMOS18 [get_ports {ch2_ac_coupling_*}]
+set_property PACKAGE_PIN B16 [get_ports {ch2_ac_h}]
+set_property PACKAGE_PIN B17 [get_ports {ch2_ac_l}]
+set_property IOSTANDARD LVCMOS18 [get_ports {ch2_ac_*}]
 
 # Channel 1 Gain control (high/low)
 set_property PACKAGE_PIN D15 [get_ports {ch1_gain_h}]
@@ -94,9 +94,9 @@ set_property PACKAGE_PIN A18 [get_ports {ch2_gain_l}]
 set_property IOSTANDARD LVCMOS18 [get_ports {ch2_gain_*}]
 
 # Common coupling control
-set_property PACKAGE_PIN E18 [get_ports {common_coupling_h}]
-set_property PACKAGE_PIN D18 [get_ports {common_coupling_l}]
-set_property IOSTANDARD LVCMOS18 [get_ports {common_coupling_*}]
+set_property PACKAGE_PIN E18 [get_ports {com_couple_h}]
+set_property PACKAGE_PIN D18 [get_ports {com_couple_l}]
+set_property IOSTANDARD LVCMOS18 [get_ports {com_couple_*}]
 
 #---------------------------------------------------------------------------
 # SPI CONFIGURATION INTERFACE
@@ -109,23 +109,19 @@ set_property DRIVE 4 [get_ports {adc_spi_sdio}]
 set_property DRIVE 4 [get_ports {adc_spi_sclk}]
 set_property DRIVE 4 [get_ports {adc_spi_cs}]
 
-#---------------------------------------------------------------------------
-# ADC SYNC
-#---------------------------------------------------------------------------
-set_property PACKAGE_PIN D17 [get_ports {adc_sync}]
-set_property IOSTANDARD LVCMOS18 [get_ports {adc_sync}]
-set_property DRIVE 4 [get_ports {adc_sync}]
-set_property SLEW SLOW [get_ports {adc_sync}]
+# ADC SYNC — unused in Phase 1 streaming mode
+# set_property PACKAGE_PIN D17 [get_ports {adc_sync}]
 
 #---------------------------------------------------------------------------
 # I²C CONFIGURATION (Bank 14, 3.3V)
 #---------------------------------------------------------------------------
 set_property PACKAGE_PIN U16 [get_ports {adc_scl}]
 set_property PACKAGE_PIN V17 [get_ports {adc_sda}]
-set_property PACKAGE_PIN T11 [get_ports {adc_det}]
 set_property IOSTANDARD LVCMOS33 [get_ports {adc_scl}]
 set_property IOSTANDARD LVCMOS33 [get_ports {adc_sda}]
-set_property IOSTANDARD LVCMOS33 [get_ports {adc_det}]
+# ADC detect — unused in Phase 1 streaming mode
+# set_property PACKAGE_PIN T11 [get_ports {adc_det}]
+# set_property IOSTANDARD LVCMOS33 [get_ports {adc_det}]
 set_property PULLUP TRUE [get_ports {adc_scl}]
 set_property PULLUP TRUE [get_ports {adc_sda}]
 
