@@ -48,6 +48,7 @@ module tb_glitch_filter;
     reg        bypass = 1'b0;
     dbg_info_t dbg_info;
     wire [15:0] dbg_max_delta;
+    wire        heartbeat;
 
     glitch_filter u_dut (
         .clk           (clk),
@@ -59,7 +60,8 @@ module tb_glitch_filter;
         .threshold     (threshold),
         .bypass        (bypass),
         .dbg_info      (dbg_info),
-        .dbg_max_delta (dbg_max_delta)
+        .dbg_max_delta (dbg_max_delta),
+        .heartbeat     (heartbeat)
     );
 
     // =========================================================================
@@ -275,6 +277,29 @@ module tb_glitch_filter;
 
         check("max_delta >= 8000",
                dbg_max_delta >= 16'd8000);
+
+        $display("");
+
+        // -------------------------------------------------------------------
+        // Test 10: heartbeat "filter alive" indicator
+        // -------------------------------------------------------------------
+        $display("--- Test 10: heartbeat ---");
+
+        // Heartbeat must be high immediately after a glitch (pulse-stretched)
+        check("heartbeat high after recent glitch",
+               heartbeat == 1'b1);
+
+        // Wait 1.2 ms with no glitches — heartbeat must drop
+        // (PULSE_STRETCH_CYC = 100_000 cycles @ 100 MHz = 1 ms)
+        din_valid = 1'b0;
+        repeat (120_000) @(posedge clk);
+
+        check("heartbeat low after 1.2 ms idle",
+               heartbeat == 1'b0);
+
+        // Restore valid for downstream tests
+        flush_pipeline();
+        din_valid = 1'b1;
 
         $display("");
 

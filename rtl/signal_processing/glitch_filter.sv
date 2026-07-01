@@ -64,7 +64,16 @@ module glitch_filter (
 
     // --- Debug Interface ---
     output dbg_info_t  dbg_info,        // 128-bit packed struct (4 × 32-bit regs)
-    output logic [15:0] dbg_max_delta   // sticky max jump observed
+    output logic [15:0] dbg_max_delta,  // sticky max jump observed
+
+    // --- "Filter Alive" Heartbeat (drive to LED or top-level status) ---
+    // 1 = at least one glitch detected in the last PULSE_STRETCH_CYC sys_clk
+    //     cycles (default 1 ms @ 100 MHz = 100_000 cycles)
+    // 0 = no glitches seen for > PULSE_STRETCH_CYC cycles (filter idle)
+    // Glitches occur every ~2.44 µs (~410 kHz), so with normal operation this
+    // signal stays solid 1. If the glitch source disappears, this goes 0
+    // within 1 ms — clear "filter is alive" indicator.
+    output logic        heartbeat
 );
 
     // =========================================================================
@@ -205,6 +214,25 @@ module glitch_filter (
     end
 
     assign dbg_max_delta = max_delta_reg;
+
+    // =========================================================================
+    // Heartbeat — pulse-stretch glitch_detected_r to ~1 ms
+    // =========================================================================
+    // Counter resets on every detected glitch; saturates at PULSE_STRETCH_CYC.
+    // heartbeat = 1 while counter < threshold (glitch seen recently).
+    // heartbeat = 0 once counter reaches threshold (no glitches for ~1 ms).
+    localparam [16:0] PULSE_STRETCH_CYC = 17'd100_000;  // 1 ms @ 100 MHz
+    reg [16:0] hb_cnt;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            hb_cnt <= 17'd0;
+        end else if (glitch_detected_r) begin
+            hb_cnt <= 17'd0;            // reset on every detected glitch
+        end else if (hb_cnt < PULSE_STRETCH_CYC) begin
+            hb_cnt <= hb_cnt + 1'b1;    // count up while idle
+        end
+    end
+    assign heartbeat = (hb_cnt < PULSE_STRETCH_CYC);
 
     // dbg_info output (positional concatenation for iverilog compat)
     assign dbg_info = {
