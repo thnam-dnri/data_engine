@@ -55,6 +55,9 @@
 //   EMA_SHIFT     — EMA averaging constant = 1/2^shift (default 8 → 1/256)
 //   WARMUP        — samples tracked before adaptive trigger may fire
 //                   (lets baseline/σ converge; default 1024 ≈ 10 µs)
+//   MIN_MARGIN    — minimum adaptive threshold margin in ADC counts. This
+//                   prevents tiny MAD estimates from placing the threshold
+//                   inside normal baseline noise.
 //
 // Debug outputs:
 //   dbg_baseline  — current EMA baseline (adaptive mode)
@@ -70,7 +73,8 @@ module trigger #(
     parameter BOXCAR_N   = 8,      // boxcar depth (MUST be power of 2)
     parameter K_SIGMA    = 5,      // threshold = baseline ± k·sigma
     parameter EMA_SHIFT  = 8,      // EMA constant = 1/2^EMA_SHIFT
-    parameter WARMUP     = 1024    // warmup samples before adaptive fire
+    parameter WARMUP     = 1024,   // warmup samples before adaptive fire
+    parameter MIN_MARGIN = 48      // minimum adaptive threshold margin
 ) (
     input  wire              clk,            // 100 MHz system clock
     input  wire              rst_n,          // active-low reset
@@ -207,8 +211,10 @@ module trigger #(
     wire signed [22:0] baseline_s = $signed({7'b0, baseline});
     wire signed [22:0] sigma_s    = $signed({7'b0, sigma_mad});
     wire signed [22:0] k_sigma    = K_SIGMA * sigma_s;
-    wire signed [22:0] thr_neg    = baseline_s - k_sigma;   // negative-edge
-    wire signed [22:0] thr_pos    = baseline_s + k_sigma;   // positive-edge
+    wire signed [22:0] min_margin = $signed(MIN_MARGIN);
+    wire signed [22:0] adaptive_margin = (k_sigma > min_margin) ? k_sigma : min_margin;
+    wire signed [22:0] thr_neg    = baseline_s - adaptive_margin;   // negative-edge
+    wire signed [22:0] thr_pos    = baseline_s + adaptive_margin;   // positive-edge
     wire signed [22:0] adaptive_thr = cfg_polarity ? thr_neg : thr_pos;
 
     // =========================================================================

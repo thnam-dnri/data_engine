@@ -77,6 +77,7 @@ opt_design
 place_design
 phys_opt_design
 route_design
+phys_opt_design -hold_fix
 write_checkpoint -force [file join $output_dir routed.dcp]
 
 # --- Reports after implementation ---

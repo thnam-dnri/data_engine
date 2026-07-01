@@ -8,6 +8,7 @@
 //   - IDDR: Input Double Data Rate (SAME_EDGE_PIPELINED mode)
 //   - BUFG: Global clock buffer (pass-through)
 //   - OBUFDS: Differential output buffer (pass-through)
+//   - LUT1: 1-input LUT (truth-table pass-through/inverter/etc.)
 //
 // These are NOT synthesizable — they provide enough accuracy for functional
 // testbenches but do NOT model timing, skew, or Xilinx-specific behavior.
@@ -82,3 +83,15 @@ module OBUFDS #(
     assign O  = I;
     assign OB = ~I;
 endmodule : OBUFDS
+
+// =========================================================================
+// LUT1 — 1-input lookup table
+// =========================================================================
+module LUT1 #(
+    parameter [1:0] INIT = 2'b10
+) (
+    output wire O,
+    input  wire I0
+);
+    assign O = I0 ? INIT[1] : INIT[0];
+endmodule : LUT1

@@ -84,6 +84,8 @@ module top_pipeline (
     localparam [10:0] PRE_SAMPLES   = 11'd600;
     localparam [10:0] POST_SAMPLES  = 11'd1200;
     localparam [10:0] TOTAL_SAMPLES = PRE_SAMPLES + POST_SAMPLES;  // 1800
+    // Localparam for descriptor width (matches pipeline_pkg::descriptor_t).
+    localparam DW = 160;
 
     // Trigger config (adaptive negative-edge on chA, 14-bit)
     //   CFG_THRESHOLD / CFG_HYSTERESIS: legacy fallback used only when the
@@ -241,6 +243,16 @@ module top_pipeline (
     // =========================================================================
     // Event counter (latched at trigger for descriptor event_id)
     // =========================================================================
+    wire trigger_pulse;
+    reg  event_arm = 1'b0;
+    wire trigger_capture_ready;
+    reg  desc_pending;
+    wire desc_fifo_full;
+    wire desc_fifo_empty;
+    wire reader_busy;
+    reg  event_active;
+    reg  new_event_pending;
+
     reg [15:0] event_counter;
     always @(posedge sys_clk or negedge rst_n) begin
         if (!rst_n) event_counter <= 16'd0;
@@ -250,13 +262,12 @@ module top_pipeline (
     // =========================================================================
     // Trigger (LEADING_EDGE only)
     // =========================================================================
-    wire trigger_pulse;
     wire armed;
     wire triggered;
     wire [47:0] event_timestamp;
-    reg  event_arm = 1'b0;
     wire [15:0] dbg_baseline;
     wire [15:0] dbg_sigma;
+    dbg_info_t  trigger_dbg_info;
     reg  adaptive_bypass = 1'b0;   // 0 = adaptive (default), 1 = legacy fixed-threshold
     trigger #(
         .BOXCAR_N  (CFG_BOXCAR_N),
@@ -266,7 +277,7 @@ module top_pipeline (
     ) u_trigger (
         .clk            (sys_clk),
         .rst_n          (rst_n),
-        .arm            (event_arm && adc_init_done),
+        .arm            (trigger_capture_ready),
         .adc_data       (glitch_out),
         .adc_dv         (glitch_dv),
         .cfg_threshold  (CFG_THRESHOLD),
@@ -281,7 +292,7 @@ module top_pipeline (
         .event_timestamp(event_timestamp),
         .dbg_baseline   (dbg_baseline),
         .dbg_sigma      (dbg_sigma),
-        .dbg_info       ()
+        .dbg_info       (trigger_dbg_info)
     );
 
     // =========================================================================
@@ -314,15 +325,12 @@ module top_pipeline (
     reg [12:0] trig_ptr_cap;
     reg [15:0] event_id_cap;
     reg [47:0] ts_cap;
-    reg        desc_pending;
     reg        desc_push;
     reg [15:0] lost_event_counter;
 
     // 160-bit descriptor
     wire [12:0] start_addr = trig_ptr_cap - PRE_SAMPLES;  // 13-bit wrap
     wire [DW-1:0] descriptor;
-    // Localparam for descriptor width (matches pipeline_pkg::descriptor_t)
-    localparam DW = 160;
     assign descriptor = {
         ts_cap,                  // [159:112] timestamp (48-bit)
         16'd0,                   // [111:96]  amplitude (TODO: compute from waveform)
@@ -335,9 +343,6 @@ module top_pipeline (
         32'h2026_0701,           // [36:5]    firmware_version (YYYYMMDD)
         5'd0                     // [4:0]     diag_snapshot
     };
-
-    wire        desc_fifo_full;
-    wire        desc_fifo_empty;
 
     always @(posedge sys_clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -391,19 +396,50 @@ module top_pipeline (
     );
 
     // =========================================================================
+    // TX Waveform FIFO signals
+    // The drain FSM and comm_dpti sys-side handshake are both in sys_clk, so the
+    // FIFO read side is also sys_clk. comm_dpti performs the sys_clk→dpti_clk CDC.
+    // =========================================================================
+    wire [15:0] tx_fifo_pop_data;
+    wire        tx_fifo_empty;
+    wire [12:0] tx_fifo_count;
+    wire        tx_fifo_full;
+    wire [12:0] tx_fifo_wr_count;
+
+    // =========================================================================
+    // Drain FSM state is declared before waveform_reader/status logic because
+    // reader throttling and status snapshots both reference these live fields.
+    // =========================================================================
+    reg [3:0]  dr_state;
+    reg [15:0] dr_sample_buf;
+    reg [11:0] dr_sample_cnt;
+    reg        drain_rd_req;
+    reg [7:0]  dr_tx_byte;
+    reg        dr_tx_valid;
+    reg [15:0] dr_event_id;
+    reg [11:0] dr_event_length;
+
+    reg [15:0] pending_event_id;
+    reg [11:0] pending_length;
+
+    // =========================================================================
     // Waveform reader (bursts 1800 samples from circular buffer)
     // =========================================================================
     wire reader_sample_valid;
     wire [15:0] reader_sample_data;
-    wire        reader_busy;
     wire        reader_burst_start;
     wire [DW-1:0] reader_burst_descriptor;
     wire [10:0] reader_burst_remaining;
+    wire        reader_desc_empty = desc_fifo_empty | new_event_pending | event_active;
+    assign trigger_capture_ready = event_arm && adc_init_done &&
+                                   !desc_pending && desc_fifo_empty &&
+                                   !reader_busy && !new_event_pending &&
+                                   !event_active;
 
     waveform_reader u_reader (
         .clk             (sys_clk),
         .rst_n           (rst_n),
-        .desc_empty      (desc_fifo_empty),
+        .desc_empty      (reader_desc_empty),
         .desc_data       (desc_fifo_data),
         .desc_pop_req    (desc_pop_req),
         .cbuf_rd_addr    (cbuf_rd_addr),
@@ -419,21 +455,15 @@ module top_pipeline (
     );
 
     // =========================================================================
-    // TX Waveform FIFO (dual-clock: wr=sys_clk, rd=ft_clk)
+    // TX Waveform FIFO
     // =========================================================================
-    wire [15:0] tx_fifo_pop_data;
-    wire        tx_fifo_empty;
-    wire [12:0] tx_fifo_count;
-    wire        tx_fifo_full;
-    wire [12:0] tx_fifo_wr_count;
-
     tx_wave_fifo u_tx_fifo (
         .wr_clk  (sys_clk),
         .wr_rst_n(rst_n),
         .wr_req  (reader_sample_valid),
         .wr_data (reader_sample_data),
         .full    (tx_fifo_full),
-        .rd_clk  (dpti_clk),
+        .rd_clk  (sys_clk),
         .rd_rst_n(rst_n),
         .rd_req  (drain_rd_req),
         .pop_data(tx_fifo_pop_data),
@@ -450,6 +480,7 @@ module top_pipeline (
     wire       dpti_tx_rdy;
     wire [7:0] dpti_rx_data;
     wire       dpti_rx_vld;
+    wire       dpti_rx_rd;
 
     comm_dpti u_comm_dpti (
         .sys_clk    (sys_clk),
@@ -473,25 +504,105 @@ module top_pipeline (
     );
 
     // =========================================================================
+    // Debug status response
+    // Host command 0x0B snapshots key health signals and returns a 32-byte
+    // packet over the same DPTI TX path:
+    //   D1 6D 01 20, flags[15:0], {trigger_state,dr_state}, desc_count,
+    //   sample_count[15:0], event_counter, baseline, sigma, cbuf_wr_ptr,
+    //   tx_fifo_wr_count, reader_remaining, lost_events, crossing_count,
+    //   trigger_count, live_flags, dr_sample_cnt, status_seq, checksum.
+    // =========================================================================
+    localparam [7:0] STATUS_SYNC_HI = 8'hD1;
+    localparam [7:0] STATUS_SYNC_LO = 8'h6D;
+    localparam [7:0] STATUS_VERSION = 8'h01;
+    localparam [7:0] STATUS_LEN     = 8'd32;
+
+    reg        status_req;
+    reg        status_cmd_pulse;
+    reg        status_active;
+    reg [4:0]  status_idx;
+    reg [7:0]  status_seq;
+
+    reg [15:0] st_flags;
+    reg [3:0]  st_trigger_state;
+    reg [3:0]  st_dr_state;
+    reg [7:0]  st_desc_count;
+    reg [15:0] st_sample_count;
+    reg [15:0] st_event_counter;
+    reg [15:0] st_baseline;
+    reg [15:0] st_sigma;
+    reg [15:0] st_cbuf_wr_ptr;
+    reg [15:0] st_tx_fifo_wr_count;
+    reg [15:0] st_reader_remaining;
+    reg [15:0] st_lost_event_counter;
+    reg [15:0] st_crossing_count;
+    reg [15:0] st_trigger_count;
+    reg [7:0]  st_live_flags;
+    reg [7:0]  st_dr_sample_cnt;
+
+    wire [7:0] status_checksum =
+        STATUS_SYNC_HI ^ STATUS_SYNC_LO ^ STATUS_VERSION ^ STATUS_LEN ^
+        st_flags[15:8] ^ st_flags[7:0] ^
+        {st_trigger_state, st_dr_state} ^ st_desc_count ^
+        st_sample_count[15:8] ^ st_sample_count[7:0] ^
+        st_event_counter[15:8] ^ st_event_counter[7:0] ^
+        st_baseline[15:8] ^ st_baseline[7:0] ^
+        st_sigma[15:8] ^ st_sigma[7:0] ^
+        st_cbuf_wr_ptr[15:8] ^ st_cbuf_wr_ptr[7:0] ^
+        st_tx_fifo_wr_count[15:8] ^ st_tx_fifo_wr_count[7:0] ^
+        st_reader_remaining[15:8] ^ st_reader_remaining[7:0] ^
+        st_lost_event_counter[15:8] ^ st_lost_event_counter[7:0] ^
+        st_crossing_count[15:8] ^ st_crossing_count[7:0] ^
+        st_trigger_count[15:8] ^ st_trigger_count[7:0] ^
+        st_live_flags ^ st_dr_sample_cnt ^ status_seq;
+
+    function automatic [7:0] status_byte(input [4:0] idx);
+        begin
+            case (idx)
+                5'd0:  status_byte = STATUS_SYNC_HI;
+                5'd1:  status_byte = STATUS_SYNC_LO;
+                5'd2:  status_byte = STATUS_VERSION;
+                5'd3:  status_byte = STATUS_LEN;
+                5'd4:  status_byte = st_flags[15:8];
+                5'd5:  status_byte = st_flags[7:0];
+                5'd6:  status_byte = {st_trigger_state, st_dr_state};
+                5'd7:  status_byte = st_desc_count;
+                5'd8:  status_byte = st_sample_count[15:8];
+                5'd9:  status_byte = st_sample_count[7:0];
+                5'd10: status_byte = st_event_counter[15:8];
+                5'd11: status_byte = st_event_counter[7:0];
+                5'd12: status_byte = st_baseline[15:8];
+                5'd13: status_byte = st_baseline[7:0];
+                5'd14: status_byte = st_sigma[15:8];
+                5'd15: status_byte = st_sigma[7:0];
+                5'd16: status_byte = st_cbuf_wr_ptr[15:8];
+                5'd17: status_byte = st_cbuf_wr_ptr[7:0];
+                5'd18: status_byte = st_tx_fifo_wr_count[15:8];
+                5'd19: status_byte = st_tx_fifo_wr_count[7:0];
+                5'd20: status_byte = st_reader_remaining[15:8];
+                5'd21: status_byte = st_reader_remaining[7:0];
+                5'd22: status_byte = st_lost_event_counter[15:8];
+                5'd23: status_byte = st_lost_event_counter[7:0];
+                5'd24: status_byte = st_crossing_count[15:8];
+                5'd25: status_byte = st_crossing_count[7:0];
+                5'd26: status_byte = st_trigger_count[15:8];
+                5'd27: status_byte = st_trigger_count[7:0];
+                5'd28: status_byte = st_live_flags;
+                5'd29: status_byte = st_dr_sample_cnt;
+                5'd30: status_byte = status_seq;
+                5'd31: status_byte = status_checksum;
+                default: status_byte = 8'h00;
+            endcase
+        end
+    endfunction
+
+    wire [7:0] status_tx_byte = status_byte(status_idx);
+
+    // =========================================================================
     // Drain FSM (byte splitter, packet builder)
     // Per event: A5 5A <event_id[15:8]> <event_id[7:0]> <sample[15:8]><sample[7:0]>...
     // Backward-compatible with sig_recorder wire format.
     // =========================================================================
-    reg [3:0]  dr_state;
-    reg [15:0] dr_sample_buf;
-    reg [11:0] dr_sample_cnt;
-    reg        drain_rd_req;
-    reg [7:0]  dr_tx_byte;
-    reg        dr_tx_valid;
-    reg        event_active;
-
-    reg [15:0] dr_event_id;
-    reg [11:0] dr_event_length;
-
-    reg        new_event_pending;
-    reg [15:0] pending_event_id;
-    reg [11:0] pending_length;
-
     // Latch event metadata from burst_start
     always @(posedge sys_clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -533,7 +644,7 @@ module top_pipeline (
             case (dr_state)
                 4'd0: begin  // IDLE
                     event_active <= 1'b0;
-                    if (new_event_pending && !tx_fifo_empty) begin
+                    if (!status_active && !status_req && new_event_pending && !tx_fifo_empty) begin
                         dr_tx_byte    <= 8'hA5;
                         dr_tx_valid   <= 1'b1;
                         event_active  <= 1'b1;
@@ -566,6 +677,7 @@ module top_pipeline (
                 end
                 4'd4: begin  // event_id[7:0] then read sample
                     event_active <= 1'b1;
+                    dr_tx_valid  <= 1'b1;
                     if (dpti_tx_rdy) begin
                         dr_sample_cnt <= 12'd0;
                         dr_sample_buf <= tx_fifo_pop_data;
@@ -604,22 +716,26 @@ module top_pipeline (
         end
     end
 
-    assign dpti_tx_data = event_active ? dr_tx_byte : 8'd0;
-    assign dpti_tx_wr   = event_active & dr_tx_valid;
+    assign dpti_tx_data = status_active ? status_tx_byte :
+                          event_active  ? dr_tx_byte :
+                                          8'd0;
+    assign dpti_tx_wr   = (status_active) | (event_active & dr_tx_valid);
 
     // =========================================================================
     // Command decoder (basic: 0x00=stop, 0x02=arm, 0x04=chA, 0x05=chB)
     // =========================================================================
     reg        stream_enable = 1'b0;
-    wire       dpti_rx_rd;
     always @(posedge sys_clk or negedge rst_n) begin
         if (!rst_n) begin
             stream_enable     <= 1'b0;
             event_arm         <= 1'b0;
             glitch_filter_en  <= 1'b1;
             adaptive_bypass   <= 1'b0;   // adaptive trigger by default
-        end else if (dpti_rx_vld) begin
-            case (dpti_rx_data)
+            status_cmd_pulse  <= 1'b0;
+        end else begin
+            status_cmd_pulse <= 1'b0;
+            if (dpti_rx_vld) begin
+                case (dpti_rx_data)
                 8'h00: begin stream_enable <= 1'b0; event_arm <= 1'b0; end
                 8'h01: begin stream_enable <= 1'b1; event_arm <= 1'b0; end
                 8'h02: begin stream_enable <= 1'b0; event_arm <= 1'b1; end
@@ -627,11 +743,84 @@ module top_pipeline (
                 8'h08: glitch_filter_en <= 1'b1;
                 8'h09: adaptive_bypass <= 1'b1;   // legacy fixed-threshold trigger
                 8'h0A: adaptive_bypass <= 1'b0;   // adaptive trigger (default)
+                8'h0B: begin
+                    status_cmd_pulse       <= 1'b1;
+                    st_flags               <= {
+                        rst_n,
+                        cdce_init_done,
+                        adc_init_done,
+                        event_arm,
+                        adaptive_bypass,
+                        glitch_filter_en,
+                        adc_dv_dco,
+                        !cdc_empty,
+                        glitch_dv,
+                        armed,
+                        triggered,
+                        desc_fifo_full,
+                        desc_fifo_empty,
+                        reader_busy,
+                        tx_fifo_full,
+                        tx_fifo_empty
+                    };
+                    st_trigger_state       <= trigger_dbg_info.state;
+                    st_dr_state            <= dr_state;
+                    st_desc_count          <= desc_count;
+                    st_sample_count        <= sample_counter[15:0];
+                    st_event_counter       <= event_counter;
+                    st_baseline            <= dbg_baseline;
+                    st_sigma               <= dbg_sigma;
+                    st_cbuf_wr_ptr         <= {3'b000, cbuf_wr_ptr};
+                    st_tx_fifo_wr_count    <= {3'b000, tx_fifo_wr_count};
+                    st_reader_remaining    <= {5'b00000, reader_burst_remaining};
+                    st_lost_event_counter  <= lost_event_counter;
+                    st_crossing_count      <= trigger_dbg_info.word_count;
+                    st_trigger_count       <= trigger_dbg_info.event_count;
+                    st_live_flags          <= {
+                        new_event_pending,
+                        event_active,
+                        desc_pending,
+                        desc_push,
+                        reader_burst_start,
+                        reader_sample_valid,
+                        dpti_tx_rdy,
+                        dpti_rx_vld
+                    };
+                    st_dr_sample_cnt       <= dr_sample_cnt[7:0];
+                end
                 default: ;
-            endcase
+                endcase
+            end
         end
     end
     assign dpti_rx_rd = dpti_rx_vld;
+
+    always @(posedge sys_clk or negedge rst_n) begin
+        if (!rst_n) begin
+            status_active <= 1'b0;
+            status_idx    <= 5'd0;
+            status_seq    <= 8'd0;
+            status_req    <= 1'b0;
+        end else begin
+            if (status_cmd_pulse) begin
+                status_req <= 1'b1;
+            end
+
+            if (!status_active && status_req && !event_active) begin
+                status_active <= 1'b1;
+                status_idx    <= 5'd0;
+                status_seq    <= status_seq + 1'b1;
+                status_req    <= 1'b0;
+            end else if (status_active && dpti_tx_rdy) begin
+                if (status_idx == 5'd31) begin
+                    status_active <= 1'b0;
+                    status_idx    <= 5'd0;
+                end else begin
+                    status_idx <= status_idx + 1'b1;
+                end
+            end
+        end
+    end
 
     // =========================================================================
     // LEDs: armed, reader_busy, !tx_fifo_empty, trigger_pulse (during init)

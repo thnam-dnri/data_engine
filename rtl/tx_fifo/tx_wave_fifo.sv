@@ -30,16 +30,10 @@
 // words_read, dpti_stall_cycles (per Architecture.md §10).
 //
 // Write pipeline (1-cycle latency): wr_data and wr_ptr[AW-1:0] are
-// registered before driving the BRAM. This fixes a sys_clk hold violation
-// between the upstream register (waveform_reader.sample_data_reg) and the
-// BRAM data input (DIADI) at Fast corner. The original (no pipeline) had
-// 2 failing endpoints, worst slack -0.028 ns on the reader→tx_fifo path.
-// A 2-stage pipeline was tried but introduced 8 new hold violations
-// inside the Xilinx cdc_fifo IP (doutb_reg → doutb_pipe path) — so 1-stage
-// is the sweet spot. Remaining -0.029 ns slack on the new internal reg→BRAM
-// path is within process-variation noise on -1 speed grade; phys_opt_design
-// has been run. 1-cycle latency is negligible vs. the 4096-deep FIFO and
-// the 60 MHz DPTI bottleneck.
+// registered before driving the BRAM. LUT1 delay buffers are kept on the
+// write-data bits to add min-delay margin on the internal reg-to-BRAM DIADI
+// hold path at Fast corner. 1-cycle latency is negligible vs. the 4096-deep
+// FIFO and the 60 MHz DPTI bottleneck.
 //------------------------------------------------------------------------------
 
 `default_nettype none
@@ -124,9 +118,22 @@ module tx_wave_fifo #(
     (* ram_style = "block" *)
     reg [WIDTH-1:0] mem [0:DEPTH-1];
 
+    wire [WIDTH-1:0] wr_data_bram;
+
+    genvar db;
+    generate
+        for (db = 0; db < WIDTH; db = db + 1) begin : gen_wr_data_hold_buf
+            (* DONT_TOUCH = "TRUE" *)
+            LUT1 #(.INIT(2'b10)) u_wr_data_hold_buf (
+                .I0(wr_data_reg[db]),
+                .O (wr_data_bram[db])
+            );
+        end
+    endgenerate
+
     always_ff @(posedge wr_clk) begin
         if (wr_actual_d) begin
-            mem[wr_addr_reg] <= wr_data_reg;
+            mem[wr_addr_reg] <= wr_data_bram;
         end
     end
 
