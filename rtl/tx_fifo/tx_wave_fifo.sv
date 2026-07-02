@@ -31,9 +31,9 @@
 //
 // Write pipeline (1-cycle latency): wr_data and wr_ptr[AW-1:0] are
 // registered before driving the BRAM. LUT1 delay buffers are kept on the
-// write-data bits to add min-delay margin on the internal reg-to-BRAM DIADI
-// hold path at Fast corner. 1-cycle latency is negligible vs. the 4096-deep
-// FIFO and the 60 MHz DPTI bottleneck.
+// write-data and write-address bits to add min-delay margin on the internal
+// reg-to-BRAM hold paths at Fast corner. 1-cycle latency is negligible vs.
+// the 4096-deep FIFO and the 60 MHz DPTI bottleneck.
 //------------------------------------------------------------------------------
 
 `default_nettype none
@@ -119,6 +119,7 @@ module tx_wave_fifo #(
     reg [WIDTH-1:0] mem [0:DEPTH-1];
 
     wire [WIDTH-1:0] wr_data_bram;
+    wire [AW-1:0]    wr_addr_bram;
 
     genvar db;
     generate
@@ -131,9 +132,20 @@ module tx_wave_fifo #(
         end
     endgenerate
 
+    genvar ab;
+    generate
+        for (ab = 0; ab < AW; ab = ab + 1) begin : gen_wr_addr_hold_buf
+            (* DONT_TOUCH = "TRUE" *)
+            LUT1 #(.INIT(2'b10)) u_wr_addr_hold_buf (
+                .I0(wr_addr_reg[ab]),
+                .O (wr_addr_bram[ab])
+            );
+        end
+    endgenerate
+
     always_ff @(posedge wr_clk) begin
         if (wr_actual_d) begin
-            mem[wr_addr_reg] <= wr_data_bram;
+            mem[wr_addr_bram] <= wr_data_bram;
         end
     end
 

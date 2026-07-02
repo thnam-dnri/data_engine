@@ -530,9 +530,50 @@ module tb_trigger;
         $display("");
 
         // ---------------------------------------------------------------------
-        // Test 17: dbg_if fields (adaptive mode)
+        // Test 17: Adaptive validation rejects baseline-return spike
         // ---------------------------------------------------------------------
-        $display("--- Test 17: dbg_if fields (adaptive) ---");
+        $display("--- Test 17: adaptive validation rejects spike ---");
+        reset_dut();
+        cfg_threshold       = 16'd8000;
+        cfg_hysteresis      = 16'd100;
+        cfg_holdoff         = 24'd100;
+        cfg_polarity        = 1'b1;
+        cfg_adaptive_bypass = 1'b0;
+
+        arm = 1'b1;
+        send_noise(3000, 16'd8400, 16'd4);
+        clear_latches();
+        // One low sample can cross the adaptive threshold through the boxcar,
+        // but the following samples return above the baseline guard band.
+        send_const(1, 16'd7900);
+        send_const(32, 16'd8500);
+        @(negedge clk);
+
+        check("spike rejected by validation", saw_trigger == 1'b0);
+        check("trigger_count still 0 after spike", trig_count() == 16'd0);
+        check("validation reject counted", dbg_info.reserved_3 >= 16'd1);
+
+        $display("");
+
+        // ---------------------------------------------------------------------
+        // Test 18: Adaptive validation accepts sustained low pulse
+        // ---------------------------------------------------------------------
+        $display("--- Test 18: adaptive validation accepts sustained pulse ---");
+        send_noise(2000, 16'd8400, 16'd4);
+        clear_latches();
+        send_neg_pulse(16'd8400, 16'd3000, 20, 50);
+        @(negedge clk);
+
+        check("sustained pulse accepted", saw_trigger == 1'b1);
+        check("trigger_count = 1 after accepted pulse", trig_count() == 16'd1);
+        check("state = HOLDOFF after validated pulse", dbg_info.state == 4'd3);
+
+        $display("");
+
+        // ---------------------------------------------------------------------
+        // Test 19: dbg_if fields (adaptive mode)
+        // ---------------------------------------------------------------------
+        $display("--- Test 19: dbg_if fields (adaptive) ---");
         reset_dut();
         cfg_adaptive_bypass = 1'b0;
         check("dbg bypass_mode = 0 (adaptive)", dbg_info.bypass_mode == 1'b0);
@@ -541,9 +582,9 @@ module tb_trigger;
         $display("");
 
         // ---------------------------------------------------------------------
-        // Test 18: Reset clears adaptive state
+        // Test 20: Reset clears adaptive state
         // ---------------------------------------------------------------------
-        $display("--- Test 18: Reset (adaptive) ---");
+        $display("--- Test 20: Reset (adaptive) ---");
         arm = 1'b1;
         cfg_adaptive_bypass = 1'b0;
         cfg_polarity = 1'b1;

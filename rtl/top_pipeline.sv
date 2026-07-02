@@ -103,6 +103,8 @@ module top_pipeline (
     localparam        CFG_K_SIGMA    = 5;          // threshold = baseline - k·sigma
     localparam        CFG_EMA_SHIFT  = 8;          // EMA constant 1/256
     localparam        CFG_WARMUP     = 1024;       // ~10 µs baseline/sigma settle
+    localparam        CFG_VALIDATE_N = 16;         // post-crossing shape validation
+    localparam [12:0] CFG_VALIDATE_BACKSTEP = CFG_VALIDATE_N[12:0];
 
     // Glitch filter threshold — SEPARATE from the trigger threshold.
     // Architecture.md §3: AD9648 0x0C98 glitch jump = 1376–4968 counts,
@@ -273,7 +275,8 @@ module top_pipeline (
         .BOXCAR_N  (CFG_BOXCAR_N),
         .K_SIGMA   (CFG_K_SIGMA),
         .EMA_SHIFT (CFG_EMA_SHIFT),
-        .WARMUP    (CFG_WARMUP)
+        .WARMUP    (CFG_WARMUP),
+        .VALIDATE_N(CFG_VALIDATE_N)
     ) u_trigger (
         .clk            (sys_clk),
         .rst_n          (rst_n),
@@ -359,7 +362,8 @@ module top_pipeline (
                 if (desc_fifo_full) begin
                     lost_event_counter <= lost_event_counter + 1'b1;
                 end else begin
-                    trig_ptr_cap <= cbuf_wr_ptr;
+                    trig_ptr_cap <= cbuf_wr_ptr -
+                                    (adaptive_bypass ? 13'd0 : CFG_VALIDATE_BACKSTEP);
                     event_id_cap <= event_counter;
                     ts_cap       <= event_timestamp;
                     desc_pending <= 1'b1;

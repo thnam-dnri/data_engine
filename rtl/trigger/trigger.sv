@@ -42,10 +42,10 @@
 //   it on entry, firing immediately when armed on a signal already past
 //   threshold — the "fires on baseline at ARM" HW symptom).
 //
-// FSM states (unchanged from Phase 2.3):
+// FSM states:
 //   0 IDLE      — waiting for arm
 //   1 DETECT    — looking for threshold crossing
-//   2 ACQUIRE   — reserved (sig_recorder does not use this state)
+//   2 ACQUIRE   — post-crossing validation window
 //   3 HOLDOFF   — post-trigger, preventing re-trigger + baseline freeze
 //
 // Parameters:
@@ -58,6 +58,9 @@
 //   MIN_MARGIN    — minimum adaptive threshold margin in ADC counts. This
 //                   prevents tiny MAD estimates from placing the threshold
 //                   inside normal baseline noise.
+//   VALIDATE_N    — adaptive-mode samples checked after the initial crossing
+//   RETURN_MARGIN — guard band around baseline for validation return checks
+//   MAX_RETURNS   — maximum samples allowed to return through the baseline band
 //
 // Debug outputs:
 //   dbg_baseline  — current EMA baseline (adaptive mode)
@@ -74,7 +77,10 @@ module trigger #(
     parameter K_SIGMA    = 5,      // threshold = baseline ± k·sigma
     parameter EMA_SHIFT  = 8,      // EMA constant = 1/2^EMA_SHIFT
     parameter WARMUP     = 1024,   // warmup samples before adaptive fire
-    parameter MIN_MARGIN = 48      // minimum adaptive threshold margin
+    parameter MIN_MARGIN = 48,     // minimum adaptive threshold margin
+    parameter VALIDATE_N = 16,     // adaptive post-crossing validation samples
+    parameter RETURN_MARGIN = 12,  // baseline guard band for validation
+    parameter MAX_RETURNS = 0      // tolerated baseline returns in validation
 ) (
     input  wire              clk,            // 100 MHz system clock
     input  wire              rst_n,          // active-low reset
@@ -216,6 +222,7 @@ module trigger #(
     wire signed [22:0] thr_neg    = baseline_s - adaptive_margin;   // negative-edge
     wire signed [22:0] thr_pos    = baseline_s + adaptive_margin;   // positive-edge
     wire signed [22:0] adaptive_thr = cfg_polarity ? thr_neg : thr_pos;
+    wire signed [22:0] return_margin = $signed(RETURN_MARGIN);
 
     // =========================================================================
     // Warmup counter — adaptive trigger may only fire after WARMUP samples
@@ -276,11 +283,20 @@ module trigger #(
     // =========================================================================
     localparam [1:0] IDLE    = 2'd0,
                      DETECT  = 2'd1,
-                     ACQUIRE = 2'd2,   // reserved (not used)
+                     ACQUIRE = 2'd2,   // adaptive post-crossing validation
                      HOLDOFF = 2'd3;
 
     reg [1:0]  state;
     reg [23:0] holdoff_cnt;
+    reg [7:0]  validate_count;
+    reg [7:0]  validate_returns;
+
+    wire signed [22:0] return_thr_neg = baseline_s - return_margin;
+    wire signed [22:0] return_thr_pos = baseline_s + return_margin;
+    wire validate_return_now = cfg_polarity ? (boxcar_avg_s > return_thr_neg)
+                                            : (boxcar_avg_s < return_thr_pos);
+    wire [8:0] validate_returns_next =
+        {1'b0, validate_returns} + {8'd0, validate_return_now};
 
     // baseline_freeze = busy flag (HOLDOFF). Declared as wire above; driven here.
     // (Verilog allows forward use of a wire that is driven by an assign below.)
@@ -294,6 +310,8 @@ module trigger #(
             armed            <= 1'b0;
             triggered        <= 1'b0;
             holdoff_cnt      <= 24'd0;
+            validate_count   <= 8'd0;
+            validate_returns <= 8'd0;
             event_timestamp  <= 48'd0;
         end else begin
             trigger_pulse <= 1'b0;        // default: 1-cycle pulse
@@ -317,11 +335,46 @@ module trigger #(
                     if (!arm) begin
                         state <= IDLE;
                     end else if (above_rise) begin
-                        trigger_pulse   <= 1'b1;
-                        triggered       <= 1'b1;
-                        holdoff_cnt     <= 24'd0;
                         event_timestamp <= sample_count;
-                        state           <= HOLDOFF;
+                        if (cfg_adaptive_bypass) begin
+                            trigger_pulse <= 1'b1;
+                            triggered     <= 1'b1;
+                            holdoff_cnt   <= 24'd0;
+                            state         <= HOLDOFF;
+                        end else begin
+                            validate_count   <= 8'd0;
+                            validate_returns <= 8'd0;
+                            state            <= ACQUIRE;
+                        end
+                    end
+                end
+
+                // ----------------------------------------------------------------
+                // ACQUIRE: adaptive validation after the initial crossing.
+                // Accept only if the boxcar output stays below/above the
+                // baseline guard band for most of the validation window.
+                // ----------------------------------------------------------------
+                ACQUIRE: begin
+                    armed     <= 1'b0;
+                    triggered <= 1'b0;
+                    if (!arm) begin
+                        state <= IDLE;
+                    end else if (adc_dv) begin
+                        if (validate_count >= (VALIDATE_N - 1)) begin
+                            if (validate_returns_next <= MAX_RETURNS) begin
+                                trigger_pulse <= 1'b1;
+                                triggered     <= 1'b1;
+                                holdoff_cnt   <= 24'd0;
+                                state         <= HOLDOFF;
+                            end else begin
+                                state <= DETECT;
+                            end
+                            validate_count   <= 8'd0;
+                            validate_returns <= 8'd0;
+                        end else begin
+                            validate_count   <= validate_count + 1'b1;
+                            validate_returns <= validate_returns_next[7:0];
+                        end
                     end
                 end
 
@@ -344,23 +397,15 @@ module trigger #(
                 end
 
                 // ----------------------------------------------------------------
-                // ACQUIRE: reserved (safety: don't get stuck)
-                // ----------------------------------------------------------------
-                ACQUIRE: begin
-                    armed     <= 1'b1;
-                    triggered <= 1'b0;
-                    if (!arm) state <= IDLE;
-                end
-
                 default: state <= IDLE;
             endcase
         end
     end
 
-    // baseline_freeze = 1 in IDLE or HOLDOFF. Prevents the tracker from chasing
-    // pulses that arrive before ARM (IDLE) or during post-trigger (HOLDOFF).
+    // baseline_freeze = 1 in IDLE, ACQUIRE, or HOLDOFF. Prevents the tracker
+    // from chasing pulses before ARM, during validation, or during post-trigger.
     // The tracker only runs while actively searching in DETECT.
-    assign baseline_freeze = (state == IDLE) || (state == HOLDOFF);
+    assign baseline_freeze = (state == IDLE) || (state == ACQUIRE) || (state == HOLDOFF);
 
     // =========================================================================
     // Debug counters
@@ -393,6 +438,12 @@ module trigger #(
 
             // Count rejected attempts (above_threshold while in HOLDOFF)
             if (adc_dv && above_threshold && state == HOLDOFF && !trigger_pulse)
+                rejected_count <= rejected_count + 1'b1;
+
+            // Count rejected validation candidates.
+            if (state == ACQUIRE && adc_dv &&
+                    validate_count >= (VALIDATE_N - 1) &&
+                    validate_returns_next > MAX_RETURNS)
                 rejected_count <= rejected_count + 1'b1;
         end
     end
