@@ -44,6 +44,9 @@ xsim.pid
 # Root-level markdown files (documentation kept local, not in repo)
 /*.md
 
+# Local manuscript workspace
+manuscript/
+
 # Python
 __pycache__/
 *.pyc
