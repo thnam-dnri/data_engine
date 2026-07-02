@@ -150,6 +150,17 @@ module top_pipeline (
     assign com_couple_h = 1'b1;
     assign com_couple_l = 1'b0;
 
+    // ---- dbg_info_t wires for all pipeline blocks (connected to audit_aggregator) ----
+    dbg_info_t  adc_dbg_info;
+    dbg_info_t  cdc_dbg_info;
+    dbg_info_t  glitch_dbg_info;
+    wire [15:0] glitch_dbg_max_delta;
+    dbg_info_t  cbuf_dbg_info;
+    dbg_info_t  desc_dbg_info;
+    dbg_info_t  reader_dbg_info;
+    dbg_info_t  tx_dbg_info;
+    dbg_info_t  dpti_dbg_info;
+
     // =========================================================================
     // ADC init (I2C + SPI) — kept from Phase 1
     // =========================================================================
@@ -185,7 +196,7 @@ module top_pipeline (
         .ch_b_data  (ch_b_data),
         .data_valid (adc_dv_dco),
         .channel_sel(adc_ch_sel),
-        .dbg_info   ()
+        .dbg_info   (adc_dbg_info)
     );
 
     // =========================================================================
@@ -204,7 +215,7 @@ module top_pipeline (
         .rd_en     (!cdc_empty),
         .dout      (cdc_dout),
         .empty     (cdc_empty),
-        .dbg_info  ()
+        .dbg_info  (cdc_dbg_info)
     );
 
     // =========================================================================
@@ -228,8 +239,8 @@ module top_pipeline (
         .dout_valid(glitch_dv),
         .threshold(CFG_GLITCH_THRESHOLD),
         .bypass  (glitch_bypass),
-        .dbg_info(),
-        .dbg_max_delta(),
+        .dbg_info(glitch_dbg_info),
+        .dbg_max_delta(glitch_dbg_max_delta),
         .heartbeat()  // not exposed externally in Phase 2.7
     );
 
@@ -262,6 +273,15 @@ module top_pipeline (
     end
 
     // =========================================================================
+    // 64-bit free-running run timestamp (for audit_aggregator system registers)
+    // =========================================================================
+    reg [63:0] run_timestamp;
+    always @(posedge sys_clk or negedge rst_n) begin
+        if (!rst_n) run_timestamp <= 64'd0;
+        else run_timestamp <= run_timestamp + 1'b1;
+    end
+
+    // =========================================================================
     // Trigger (LEADING_EDGE only)
     // =========================================================================
     wire armed;
@@ -270,6 +290,7 @@ module top_pipeline (
     wire [15:0] dbg_baseline;
     wire [15:0] dbg_sigma;
     dbg_info_t  trigger_dbg_info;
+
     reg  adaptive_bypass = 1'b0;   // 0 = adaptive (default), 1 = legacy fixed-threshold
     trigger #(
         .BOXCAR_N  (CFG_BOXCAR_N),
@@ -316,7 +337,7 @@ module top_pipeline (
         .rd_en    (cbuf_rd_en),
         .rd_addr  (cbuf_rd_addr),
         .rd_data  (cbuf_rd_data),
-        .dbg_info ()
+        .dbg_info (cbuf_dbg_info)
     );
 
     // =========================================================================
@@ -396,7 +417,7 @@ module top_pipeline (
         .empty           (desc_fifo_empty),
         .count           (desc_count),
         .lost_event_pulse(desc_lost_pulse),
-        .dbg_info        ()
+        .dbg_info        (desc_dbg_info)
     );
 
     // =========================================================================
@@ -455,7 +476,7 @@ module top_pipeline (
         .burst_descriptor(reader_burst_descriptor),
         .burst_remaining (reader_burst_remaining),
         .busy            (reader_busy),
-        .dbg_info        ()
+        .dbg_info        (reader_dbg_info)
     );
 
     // =========================================================================
@@ -473,7 +494,7 @@ module top_pipeline (
         .pop_data(tx_fifo_pop_data),
         .empty   (tx_fifo_empty),
         .wr_count(tx_fifo_wr_count),
-        .dbg_info()
+        .dbg_info(tx_dbg_info)
     );
 
     // =========================================================================
@@ -504,7 +525,7 @@ module top_pipeline (
         .dpti_oen   (dpti_oen),
         .dpti_siwun (dpti_siwun),
         .dpti_spien (dpti_spien),
-        .dbg_info   ()
+        .dbg_info   (dpti_dbg_info)
     );
 
     // =========================================================================
@@ -720,15 +741,38 @@ module top_pipeline (
         end
     end
 
-    assign dpti_tx_data = status_active ? status_tx_byte :
-                          event_active  ? dr_tx_byte :
-                                          8'd0;
-    assign dpti_tx_wr   = (status_active) | (event_active & dr_tx_valid);
+    // =========================================================================
+    // Register read response declarations (Phase 3A Debug Infrastructure)
+    // =========================================================================
+    localparam [7:0] REG_READ_RESP_TAG = 8'h15;
+
+    reg        reg_read_req;
+    reg        reg_read_active;
+    reg [2:0]  reg_read_idx;    // 7-byte response: 0=tag, 1=addr_hi, 2=addr_lo, 3-6=data
+    reg [7:0]  reg_read_tx_byte;
+    reg [15:0] reg_read_addr_latched;
+    reg [31:0] reg_read_data_latched;
+
+    wire [31:0] u_audit_agg_reg_rdata;
+
+    // Register-read response has highest priority, then status, then event data
+    assign dpti_tx_data = reg_read_active ? reg_read_tx_byte :
+                          status_active  ? status_tx_byte :
+                          event_active   ? dr_tx_byte :
+                                           8'd0;
+    assign dpti_tx_wr   = reg_read_active | status_active | (event_active & dr_tx_valid);
 
     // =========================================================================
-    // Command decoder (basic: 0x00=stop, 0x02=arm, 0x04=chA, 0x05=chB)
+    // Command decoder (0x00=stop, 0x02=arm, 0x10/0x11=set reg_addr, 0x14=read)
+    // Multi-byte commands use cmd_state to capture subsequent data bytes.
     // =========================================================================
     reg        stream_enable = 1'b0;
+
+    // Register read address latch (Phase 3A Debug Infrastructure)
+    reg [1:0]  cmd_state;           // 0=idle, 1=expect_addr_hi, 2=expect_addr_lo
+    reg [15:0] dbg_reg_addr;
+    reg        dbg_reg_read_pulse;
+
     always @(posedge sys_clk or negedge rst_n) begin
         if (!rst_n) begin
             stream_enable     <= 1'b0;
@@ -736,63 +780,84 @@ module top_pipeline (
             glitch_filter_en  <= 1'b1;
             adaptive_bypass   <= 1'b0;   // adaptive trigger by default
             status_cmd_pulse  <= 1'b0;
+            cmd_state         <= 2'd0;
+            dbg_reg_addr      <= 16'd0;
+            dbg_reg_read_pulse <= 1'b0;
         end else begin
-            status_cmd_pulse <= 1'b0;
+            status_cmd_pulse  <= 1'b0;
+            dbg_reg_read_pulse <= 1'b0;
+
             if (dpti_rx_vld) begin
-                case (dpti_rx_data)
-                8'h00: begin stream_enable <= 1'b0; event_arm <= 1'b0; end
-                8'h01: begin stream_enable <= 1'b1; event_arm <= 1'b0; end
-                8'h02: begin stream_enable <= 1'b0; event_arm <= 1'b1; end
-                8'h07: glitch_filter_en <= 1'b0;
-                8'h08: glitch_filter_en <= 1'b1;
-                8'h09: adaptive_bypass <= 1'b1;   // legacy fixed-threshold trigger
-                8'h0A: adaptive_bypass <= 1'b0;   // adaptive trigger (default)
-                8'h0B: begin
-                    status_cmd_pulse       <= 1'b1;
-                    st_flags               <= {
-                        rst_n,
-                        cdce_init_done,
-                        adc_init_done,
-                        event_arm,
-                        adaptive_bypass,
-                        glitch_filter_en,
-                        adc_dv_dco,
-                        !cdc_empty,
-                        glitch_dv,
-                        armed,
-                        triggered,
-                        desc_fifo_full,
-                        desc_fifo_empty,
-                        reader_busy,
-                        tx_fifo_full,
-                        tx_fifo_empty
-                    };
-                    st_trigger_state       <= trigger_dbg_info.state;
-                    st_dr_state            <= dr_state;
-                    st_desc_count          <= desc_count;
-                    st_sample_count        <= sample_counter[15:0];
-                    st_event_counter       <= event_counter;
-                    st_baseline            <= dbg_baseline;
-                    st_sigma               <= dbg_sigma;
-                    st_cbuf_wr_ptr         <= {3'b000, cbuf_wr_ptr};
-                    st_tx_fifo_wr_count    <= {3'b000, tx_fifo_wr_count};
-                    st_reader_remaining    <= {5'b00000, reader_burst_remaining};
-                    st_lost_event_counter  <= lost_event_counter;
-                    st_crossing_count      <= trigger_dbg_info.word_count;
-                    st_trigger_count       <= trigger_dbg_info.event_count;
-                    st_live_flags          <= {
-                        new_event_pending,
-                        event_active,
-                        desc_pending,
-                        desc_push,
-                        reader_burst_start,
-                        reader_sample_valid,
-                        dpti_tx_rdy,
-                        dpti_rx_vld
-                    };
-                    st_dr_sample_cnt       <= dr_sample_cnt[7:0];
-                end
-                default: ;
+                case (cmd_state)
+                    2'd0: begin  // idle — expect single-byte command or prefix
+                        case (dpti_rx_data)
+                        8'h00: begin stream_enable <= 1'b0; event_arm <= 1'b0; end
+                        8'h01: begin stream_enable <= 1'b1; event_arm <= 1'b0; end
+                        8'h02: begin stream_enable <= 1'b0; event_arm <= 1'b1; end
+                        8'h07: glitch_filter_en <= 1'b0;
+                        8'h08: glitch_filter_en <= 1'b1;
+                        8'h09: adaptive_bypass <= 1'b1;   // legacy fixed-threshold trigger
+                        8'h0A: adaptive_bypass <= 1'b0;   // adaptive trigger (default)
+                        8'h0B: begin
+                            status_cmd_pulse       <= 1'b1;
+                            st_flags               <= {
+                                rst_n,
+                                cdce_init_done,
+                                adc_init_done,
+                                event_arm,
+                                adaptive_bypass,
+                                glitch_filter_en,
+                                adc_dv_dco,
+                                !cdc_empty,
+                                glitch_dv,
+                                armed,
+                                triggered,
+                                desc_fifo_full,
+                                desc_fifo_empty,
+                                reader_busy,
+                                tx_fifo_full,
+                                tx_fifo_empty
+                            };
+                            st_trigger_state       <= trigger_dbg_info.state;
+                            st_dr_state            <= dr_state;
+                            st_desc_count          <= desc_count;
+                            st_sample_count        <= sample_counter[15:0];
+                            st_event_counter       <= event_counter;
+                            st_baseline            <= dbg_baseline;
+                            st_sigma               <= dbg_sigma;
+                            st_cbuf_wr_ptr         <= {3'b000, cbuf_wr_ptr};
+                            st_tx_fifo_wr_count    <= {3'b000, tx_fifo_wr_count};
+                            st_reader_remaining    <= {5'b00000, reader_burst_remaining};
+                            st_lost_event_counter  <= lost_event_counter;
+                            st_crossing_count      <= trigger_dbg_info.word_count;
+                            st_trigger_count       <= trigger_dbg_info.event_count;
+                            st_live_flags          <= {
+                                new_event_pending,
+                                event_active,
+                                desc_pending,
+                                desc_push,
+                                reader_burst_start,
+                                reader_sample_valid,
+                                dpti_tx_rdy,
+                                dpti_rx_vld
+                            };
+                            st_dr_sample_cnt       <= dr_sample_cnt[7:0];
+                        end
+                        8'h10: cmd_state <= 2'd1;  // expect addr_hi next
+                        8'h11: cmd_state <= 2'd2;  // expect addr_lo next
+                        8'h14: dbg_reg_read_pulse <= 1'b1;  // read current addr
+                        default: ;
+                        endcase
+                    end
+                    2'd1: begin  // expect addr_hi
+                        dbg_reg_addr[15:8] <= dpti_rx_data;
+                        cmd_state <= 2'd0;
+                    end
+                    2'd2: begin  // expect addr_lo
+                        dbg_reg_addr[7:0] <= dpti_rx_data;
+                        cmd_state <= 2'd0;
+                    end
+                    default: cmd_state <= 2'd0;
                 endcase
             end
         end
@@ -810,7 +875,7 @@ module top_pipeline (
                 status_req <= 1'b1;
             end
 
-            if (!status_active && status_req && !event_active) begin
+            if (!status_active && status_req && !event_active && !reg_read_active) begin
                 status_active <= 1'b1;
                 status_idx    <= 5'd0;
                 status_seq    <= status_seq + 1'b1;
@@ -825,6 +890,117 @@ module top_pipeline (
             end
         end
     end
+
+    // =========================================================================
+    // Register read response FSM (Phase 3A Debug Infrastructure)
+    //
+    // Protocol (host→FPGA):
+    //   0x10 <addr_hi>   — set register address high byte
+    //   0x11 <addr_lo>   — set register address low byte
+    //   0x14             — read selected register
+    //
+    // FPGA→host response (7 bytes):
+    //   0x15 <addr_hi> <addr_lo> <data[31:24]> <data[23:16]> <data[15:8]> <data[7:0]>
+    //
+    // Priority: reg_read > status > event data
+    // =========================================================================
+    // During a queued read, hold the aggregator on the requested address so the
+    // echoed address and data cannot diverge if the host updates dbg_reg_addr.
+    wire [15:0] audit_reg_addr = reg_read_req ? reg_read_addr_latched : dbg_reg_addr;
+    wire [31:0] reg_read_data  = u_audit_agg_reg_rdata;
+
+    // Select byte from the latched response data
+    always @(*) begin
+        case (reg_read_idx)
+            3'd0: reg_read_tx_byte = REG_READ_RESP_TAG;
+            3'd1: reg_read_tx_byte = reg_read_addr_latched[15:8];
+            3'd2: reg_read_tx_byte = reg_read_addr_latched[7:0];
+            3'd3: reg_read_tx_byte = reg_read_data_latched[31:24];
+            3'd4: reg_read_tx_byte = reg_read_data_latched[23:16];
+            3'd5: reg_read_tx_byte = reg_read_data_latched[15:8];
+            3'd6: reg_read_tx_byte = reg_read_data_latched[7:0];
+            default: reg_read_tx_byte = 8'h00;
+        endcase
+    end
+
+    always @(posedge sys_clk or negedge rst_n) begin
+        if (!rst_n) begin
+            reg_read_req          <= 1'b0;
+            reg_read_active       <= 1'b0;
+            reg_read_idx          <= 3'd0;
+            reg_read_addr_latched <= 16'd0;
+            reg_read_data_latched <= 32'd0;
+        end else begin
+            if (dbg_reg_read_pulse) begin
+                reg_read_req <= 1'b1;
+                reg_read_addr_latched <= dbg_reg_addr;
+            end
+
+            if (!reg_read_active && reg_read_req && !event_active && !status_active) begin
+                reg_read_active       <= 1'b1;
+                reg_read_idx          <= 3'd0;
+                reg_read_data_latched <= reg_read_data;  // latch value from aggregator
+                reg_read_req          <= 1'b0;
+            end else if (reg_read_active && dpti_tx_rdy) begin
+                if (reg_read_idx == 3'd6) begin
+                    reg_read_active <= 1'b0;
+                    reg_read_idx    <= 3'd0;
+                end else begin
+                    reg_read_idx <= reg_read_idx + 1'b1;
+                end
+            end
+        end
+    end
+
+    // =========================================================================
+    // Audit Aggregator (Phase 3A — Read-Only Debug Register Map)
+    // Collects all block dbg_info_t signals and block-specific signals into a
+    // flat 16-bit address space accessible via DPTI register-read commands.
+    // =========================================================================
+    audit_aggregator u_audit_agg (
+        .clk                  (sys_clk),
+        .rst_n                (rst_n),
+        .reg_addr             (audit_reg_addr),
+        .reg_rdata            (u_audit_agg_reg_rdata),
+
+        .adc_dbg              (adc_dbg_info),
+        .cdc_dbg              (cdc_dbg_info),
+        .glitch_dbg           (glitch_dbg_info),
+        .cbuf_dbg             (cbuf_dbg_info),
+        .trigger_dbg          (trigger_dbg_info),
+        .desc_dbg             (desc_dbg_info),
+        .reader_dbg           (reader_dbg_info),
+        .tx_dbg               (tx_dbg_info),
+        .dpti_dbg             (dpti_dbg_info),
+
+        .glitch_max_delta     (glitch_dbg_max_delta),
+        .glitch_threshold     (CFG_GLITCH_THRESHOLD),
+        .cbuf_wr_ptr          (cbuf_wr_ptr),
+        .cbuf_rd_ptr          (cbuf_rd_addr),     // rd_addr from waveform_reader
+        .cbuf_collision       (cbuf_collision),
+        .cbuf_watermark       (13'd0),            // TODO: wire from circular_buffer
+        .trigger_threshold    (CFG_THRESHOLD),
+        .trigger_cross_rate   (trigger_dbg_info.word_count),  // crossing count
+        .trigger_holdoff_remaining({8'd0, trigger_dbg_info.stall_cycles}),  // live holdoff, pad to 16-bit
+        .trigger_armed        (armed),
+        .desc_fill_level      (desc_count[5:0]),
+        .desc_watermark       (desc_dbg_info.event_count[5:0]),  // watermark from dbg
+        .desc_lost_event_count(lost_event_counter),
+        .reader_remaining     ({5'd0, reader_burst_remaining}),
+        .reader_wrap_handled  (reader_dbg_info.word_count),
+        .tx_fill_level        (tx_fifo_wr_count[11:0]),
+        .tx_watermark         (tx_dbg_info.event_count[11:0]),
+        .tx_dpti_stall        ({8'd0, tx_dbg_info.stall_cycles}),  // stall from dbg, pad to 16-bit
+        .dpti_rx_cmd_count    (dpti_dbg_info.event_count),
+        .dpti_bus_turnarounds (dpti_dbg_info.word_count),
+
+        .sys_firmware_version (32'h0003_0001),  // v3.1 (Phase 3A)
+        .sys_board_id         (32'h0000_0104),  // USB104 A7
+        .sys_run_timestamp_lo (run_timestamp[31:0]),
+        .sys_run_timestamp_hi (run_timestamp[63:32]),
+        .sys_reset_cause      (32'd0),
+        .sys_ctrl             (32'd0)
+    );
 
     // =========================================================================
     // LEDs: armed, reader_busy, !tx_fifo_empty, trigger_pulse (during init)
